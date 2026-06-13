@@ -1,0 +1,43 @@
+# ==========================================
+# 1. Dữ liệu (Data) - QUAN TRỌNG NHẤT
+# Tuyệt đối không push hàng ngàn ảnh và file thêu lên Git
+# ==========================================
+data/raw/
+data/images/
+data/masks/
+data/image_test/
+*.dst
+*.DST
+*.emb
+
+# ==========================================
+# 2. Trọng số Mô hình (Model Weights)
+# File .pth thường rất nặng (hàng trăm MB), Git không hỗ trợ tốt
+# ==========================================
+*.pth
+*.pt
+unet_embroidery.pth
+
+# ==========================================
+# 3. Môi trường ảo (Virtual Environment)
+# Mỗi máy tính sẽ tự cài thư viện riêng, không push venv lên Git
+# ==========================================
+venv/
+.venv/
+env/
+.env/
+
+# ==========================================
+# 4. Rác của Python & Jupyter Notebook
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# ==========================================
+# 5. Rác của Hệ điều hành (MacOS) & IDE
+# ==========================================
+.DS_Store
+.vscode/
+.idea/
