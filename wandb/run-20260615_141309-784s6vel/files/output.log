@@ -1,0 +1,4 @@
+Đang sử dụng thiết bị tính toán: mps
+
+Bắt đầu quá trình huấn luyện...
+Epoch [1/20] Train:  13%|███████████████████▌                                                                                                                             | 296/2194 [15:04<1:36:17,  3.04s/it, loss=0.284]

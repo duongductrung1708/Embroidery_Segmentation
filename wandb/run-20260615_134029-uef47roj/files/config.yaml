@@ -1,0 +1,64 @@
+_wandb:
+    value:
+        cli_version: 0.27.2
+        e:
+            3rowufwdhzsnudqss2ahcy2yr8c7vixn:
+                apple:
+                    ecpuCores: 4
+                    gpuCores: 10
+                    macModel: Mac14,3
+                    memoryGb: 16
+                    name: Apple M2
+                    pcpuCores: 4
+                    ramTotalBytes: "17179869184"
+                    swapTotalBytes: "5368709120"
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 8
+                cpu_count_logical: 8
+                disk:
+                    /:
+                        total: "494384795648"
+                        used: "105530331136"
+                email: trungyna1708@gmail.com
+                executable: /Users/a123/Developer/Embroidery_Segmentation/venv/bin/python3
+                git:
+                    commit: 646f3c422cf83a32af7f8a0149d759d8280f8efd
+                    remote: https://github.com/duongductrung1708/Embroidery_Segmentation.git
+                host: 123s-Mac-mini.lan
+                memory:
+                    total: "17179869184"
+                os: macOS-26.5.1-arm64-arm-64bit-Mach-O
+                program: /Users/a123/Developer/Embroidery_Segmentation/train.py
+                python: CPython 3.14.5
+                root: /Users/a123/Developer/Embroidery_Segmentation
+                startedAt: "2026-06-15T06:40:29.344877Z"
+                writerId: 3rowufwdhzsnudqss2ahcy2yr8c7vixn
+        m: []
+        python_version: 3.14.5
+        t:
+            "1":
+                - 1
+                - 41
+            "2":
+                - 1
+                - 41
+            "3":
+                - 13
+                - 16
+            "4": 3.14.5
+            "5": 0.27.2
+            "12": 0.27.2
+            "13": darwin-arm64
+architecture:
+    value: U-Net
+batch_size:
+    value: 4
+dataset:
+    value: Embroidery_DST_Binary
+epochs:
+    value: 20
+image_size:
+    value: 512
+learning_rate:
+    value: 0.0001

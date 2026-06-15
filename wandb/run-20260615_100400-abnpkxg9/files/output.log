@@ -3,4 +3,14 @@ Dữ liệu học (Train): 8775 ảnh
 Dữ liệu kiểm tra (Val): 728 ảnh
 
 Bắt đầu quá trình huấn luyện...
-Epoch [1/20] Train:  71%|█████████████████████████████████████████████████████████████████████████████████████████████████████▎                                         | 1554/2194 [1:16:48<31:23,  2.94s/it, loss=0.0434]
+Epoch [1/20] Train: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2194/2194 [1:48:29<00:00,  2.97s/it, loss=0.0239]
+Kết quả Epoch 1: Train Loss = 0.1426 | Val Loss = 0.6962
+   => Đã lưu kỷ lục mới (best_val_loss: 0.6962)
+[34m[1mwandb[0m: [33mWARNING[0m Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+Epoch [2/20] Train:  17%|███████████████████████▉                                                                                                                      | 370/2194 [1:17:47<6:23:27, 12.61s/it, loss=0.0242]
+Traceback (most recent call last):
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 116, in <module>
+    if __name__ == "__main__":
+        ^^^^^^
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 70, in main
+KeyboardInterrupt
