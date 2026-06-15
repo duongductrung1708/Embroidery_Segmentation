@@ -3,71 +3,114 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from tqdm import tqdm  # Thêm thư viện vẽ thanh tiến trình
+from tqdm import tqdm
+import wandb # 1. Gọi W&B
+
 from src.dataset import EmbroideryDataset
 from src.model import UNet
 
-# 1. Cấu hình thiết bị (GPU/CPU/MPS cho máy Mac)
-device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
-print(f"Đang sử dụng thiết bị tính toán: {device}")
+def main():
+    # ==========================================
+    # KHỞI TẠO W&B (Mở sổ tay đám mây)
+    # ==========================================
+    wandb.init(
+        project="embroidery-segmentation", # Tên dự án trên Web
+        name="unet-baseline-run1",         # Tên lần chạy này
+        config={                           # Ghi nhớ các thông số cấu hình
+            "learning_rate": 1e-4,
+            "architecture": "U-Net",
+            "dataset": "Embroidery_DST",
+            "epochs": 20,
+            "batch_size": 4,
+            "image_size": 512,
+            "threshold": 30
+        }
+    )
+    config = wandb.config # Rút gọn tên biến
 
-# 2. Khởi tạo Băng chuyền dữ liệu
-# transform.ToTensor() sẽ tự động đổi ảnh từ [0-255] thành dải [0.0 - 1.0] (Rất tốt cho AI)
-transform = transforms.Compose([
-    transforms.ToTensor()
-])
+    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    print(f"Đang sử dụng thiết bị tính toán: {device}")
 
-train_dataset = EmbroideryDataset(image_dir="data/images", mask_dir="data/masks", transform=transform)
-# Dùng batch_size nhỏ (ví dụ: 2) vì U-Net ngốn khá nhiều VRAM
-train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+    transform = transforms.Compose([transforms.ToTensor()])
 
-# 3. Khởi tạo Mô hình, Hàm Lỗi và Bác sĩ tối ưu
-model = UNet(in_channels=3, out_channels=3).to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4) # lr: Learning Rate (Bước chân học tập)
+    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=transform)
+    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=transform)
 
-# 4. BẮT ĐẦU VÒNG LẶP HUẤN LUYỆN
-EPOCHS = 20 # Số lần học sinh ôn lại toàn bộ sách giáo khoa
-print("Bắt đầu quá trình huấn luyện...")
+    # Dùng config.batch_size thay vì fix cứng số 4
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
-for epoch in range(EPOCHS):
-    model.train()
-    running_loss = 0.0
+    model = UNet(in_channels=3, out_channels=3).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
 
-    # Bọc train_loader bằng tqdm để sinh ra thanh tiến trình
-    loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{EPOCHS}]")
+    print(f"Dữ liệu học (Train): {len(train_dataset)} ảnh")
+    print(f"Dữ liệu kiểm tra (Val): {len(val_dataset)} ảnh")
 
-    for images, masks in loop:
-        # Ném dữ liệu lên GPU (hoặc CPU)
-        images = images.to(device)
-        masks = masks.to(device)
+    best_val_loss = float('inf') 
 
-        # BƯỚC 1: Xóa sạch bộ nhớ của lần học trước
-        optimizer.zero_grad()
+    print("\nBắt đầu quá trình huấn luyện...")
+    for epoch in range(config.epochs):
+        
+        # =========================
+        # PHA 1: HỌC TẬP (TRAINING)
+        # =========================
+        model.train()
+        running_train_loss = 0.0
+        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
 
-        # BƯỚC 2: Học sinh làm bài (AI dự đoán)
-        outputs = model(images)
+        for images, masks in loop:
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
 
-        # BƯỚC 3: Thầy giáo chấm điểm (So sánh outputs và masks)
-        loss = criterion(outputs, masks)
+            running_train_loss += loss.item()
+            loop.set_postfix(loss=loss.item())
+            
+            # (Tùy chọn) Có thể log loss của từng Batch lên W&B ở đây nếu muốn biểu đồ chi tiết:
+            # wandb.log({"batch_train_loss": loss.item()})
 
-        # BƯỚC 4: Tìm nguyên nhân lỗi sai (Lan truyền ngược)
-        loss.backward()
+        avg_train_loss = running_train_loss / len(train_loader)
 
-        # BƯỚC 5: Học sinh tự sửa sai trong não (Cập nhật trọng số)
-        optimizer.step()
+        # =========================
+        # PHA 2: THI THỬ (VALIDATION)
+        # =========================
+        model.eval()
+        running_val_loss = 0.0
+        
+        with torch.no_grad():
+            for val_images, val_masks in val_loader:
+                val_images, val_masks = val_images.to(device), val_masks.to(device)
+                val_outputs = model(val_images)
+                val_loss = criterion(val_outputs, val_masks)
+                running_val_loss += val_loss.item()
+                
+        avg_val_loss = running_val_loss / len(val_loader)
 
-        running_loss += loss.item()
+        print(f"Kết quả Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f} | Val Loss = {avg_val_loss:.4f}")
 
-        # Cập nhật liên tục chỉ số Loss lên thanh tiến trình
-        loop.set_postfix(loss=loss.item())
+        # ==========================================
+        # ĐẨY DATA LÊN W&B SAU MỖI EPOCH
+        # ==========================================
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss
+        })
 
-    # In ra báo cáo sau mỗi Epoch
-    epoch_loss = running_loss / len(train_loader)
-    print(f"Tổng kết Epoch {epoch+1} - Loss trung bình: {epoch_loss:.4f}\n")
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), "unet_embroidery_best.pth")
+            print(f"   => Đã lưu kỷ lục mới (best_val_loss: {best_val_loss:.4f})")
+            
+            # Đính kèm model tốt nhất vào W&B (Để làm backup trên Cloud)
+            wandb.save("unet_embroidery_best.pth")
 
-print("Hoàn thành huấn luyện!")
+    print("\nHoàn thành huấn luyện!")
+    wandb.finish() # Đóng sổ tay
 
-# 5. Lưu lại "bộ não" của AI sau khi đã học xong
-torch.save(model.state_dict(), "unet_embroidery.pth")
-print("Đã lưu trọng số mô hình tại file: unet_embroidery.pth")
+if __name__ == "__main__":
+    main()

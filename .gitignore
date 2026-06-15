@@ -3,9 +3,9 @@
 # Tuyệt đối không push hàng ngàn ảnh và file thêu lên Git
 # ==========================================
 data/raw/
-data/images/
-data/masks/
-data/image_test/
+data/train/
+data/val/
+data/test/
 *.dst
 *.DST
 *.emb
@@ -17,6 +17,7 @@ data/image_test/
 *.pth
 *.pt
 unet_embroidery.pth
+unet_embroidery_best.pth
 
 # ==========================================
 # 3. Môi trường ảo (Virtual Environment)
@@ -36,8 +37,9 @@ __pycache__/
 .ipynb_checkpoints/
 
 # ==========================================
-# 5. Rác của Hệ điều hành (MacOS) & IDE
+# 5. Rác của Hệ điều hành (MacOS/Windows) & IDE
 # ==========================================
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/

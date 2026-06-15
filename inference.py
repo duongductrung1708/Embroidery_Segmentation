@@ -20,8 +20,8 @@ transform = transforms.Compose([transforms.ToTensor()])
 
 # Lấy thử 1 bức ảnh bất kỳ trong tập Data để xem AI tô màu
 # (Bạn có thể đổi tên file thành ảnh mới mà bạn có)
-test_image_name = os.listdir("data/image_test")[0] 
-img_path = os.path.join("data/image_test", test_image_name)
+test_image_name = os.listdir("data/test/images")[0]
+img_path = os.path.join("data/test/images", test_image_name)
 
 image = Image.open(img_path).convert("RGB")
 input_tensor = transform(image).unsqueeze(0).to(device) # Thêm chiều Batch: [1, 3, 512, 512]
