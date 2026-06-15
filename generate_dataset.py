@@ -94,16 +94,23 @@ setup_directories()
 raw_dir = "data/raw"
 dst_files = sorted(glob.glob(f"{raw_dir}/**/*.dst", recursive=True) + glob.glob(f"{raw_dir}/**/*.DST", recursive=True))
 
-print(f"Tìm thấy tổng cộng {len(dst_files)} file .dst")
+total_files = len(dst_files)
+print(f"Tìm thấy tổng cộng {total_files} file .dst")
+
+# Tự động chia tỷ lệ 80% - 10% - 10%
+train_split = int(total_files * 0.8)
+val_split = int(total_files * 0.9)
+
+print(f"Kế hoạch chia: Train ({train_split} file) | Val ({val_split - train_split} file) | Test ({total_files - val_split} file)")
 
 total_train, total_val, total_test = 0, 0, 0
 
 for idx, f in enumerate(tqdm(dst_files, desc="Đang xử lý")):
-    if idx < 21:      # 21 file đầu vào Train
+    if idx < train_split:      # 80% số file vào Train
         total_train += process_file_to_patches(f, "data/train/images", "data/train/masks")
-    elif idx < 24:    # 3 file tiếp theo vào Val
+    elif idx < val_split:      # 10% tiếp theo vào Val
         total_val += process_file_to_patches(f, "data/val/images", "data/val/masks")
-    else:             # 3 file cuối vào Test
+    else:                      # 10% cuối cùng vào Test
         total_test += process_file_to_patches(f, "data/test/images", "data/test/masks")
 
 print("\nHOÀN THÀNH TẠO DATASET!")
