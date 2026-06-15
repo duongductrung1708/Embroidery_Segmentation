@@ -1,0 +1,19 @@
+Đang sử dụng thiết bị tính toán: mps
+
+Bắt đầu quá trình huấn luyện...
+Epoch [1/2] Train: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 114/114 [05:45<00:00,  3.03s/it, loss=0.595]
+
+[Epoch 1] Báo cáo:
+   Train | Loss: 0.3176 | Acc: 0.9046 | Recall: 0.8804 | F1: 0.9343
+   Val   | Loss: 2.1670 | Acc: 0.7658 | Recall: 0.6268 | F1: 0.7674
+
+Đã lưu kỷ lục mới (Best Val F1: 0.7674)
+[34m[1mwandb[0m: [33mWARNING[0m Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+Epoch [2/2] Train: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 114/114 [05:54<00:00,  3.11s/it, loss=0.236]
+
+[Epoch 2] Báo cáo:
+   Train | Loss: 0.1690 | Acc: 0.9818 | Recall: 0.9791 | F1: 0.9881
+   Val   | Loss: 1.8107 | Acc: 0.7659 | Recall: 0.6256 | F1: 0.7671
+
+
+Hoàn thành huấn luyện!

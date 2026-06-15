@@ -30,8 +30,8 @@ with torch.no_grad():
 
 # TÔ MÀU KẾT QUẢ (Binary)
 color_mask = np.zeros((predicted_mask.shape[0], predicted_mask.shape[1], 3), dtype=np.uint8)
-color_mask[predicted_mask == 0] = [0, 0, 0]       # Nền: Đen
-color_mask[predicted_mask == 1] = [0, 255, 0]     # Vùng Fill: Xanh lá cây
+color_mask[predicted_mask == 0] = [255, 255, 255]       # Nền: Trắng
+color_mask[predicted_mask == 1] = [0, 0, 0]     # Vùng Fill: Đen
 
 # Hiển thị
 plt.figure(figsize=(10, 5))
@@ -42,7 +42,7 @@ plt.imshow(image)
 plt.axis('off')
 
 plt.subplot(1, 2, 2)
-plt.title("AI Phân vùng (Fill: Xanh)")
+plt.title("AI Phân vùng (Fill: Đen)")
 plt.imshow(color_mask)
 plt.axis('off')
 

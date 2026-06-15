@@ -1,4 +1,12 @@
 Đang sử dụng thiết bị tính toán: mps
 
 Bắt đầu quá trình huấn luyện...
-Epoch [1/20] Train:  13%|███████████████████▌                                                                                                                             | 296/2194 [15:04<1:36:17,  3.04s/it, loss=0.284]
+Epoch [1/20] Train:  47%|█████████████████████████████████████████████████████████████████████▏                                                                             | 1033/2194 [52:26<58:56,  3.05s/it, loss=0.49]
+Traceback (most recent call last):
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 142, in <module>
+    main()
+    ~~~~^^
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 74, in main
+    running_train_loss += loss.item()
+                          ~~~~~~~~~^^
+KeyboardInterrupt

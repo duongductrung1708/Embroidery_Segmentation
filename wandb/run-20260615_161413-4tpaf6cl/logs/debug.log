@@ -1,0 +1,19 @@
+2026-06-15 16:14:13,516 INFO    MainThread:51023 [wandb_setup.py:_flush():81] Current SDK version is 0.27.2
+2026-06-15 16:14:13,516 INFO    MainThread:51023 [wandb_setup.py:_flush():81] Configure stats pid to 51023
+2026-06-15 16:14:13,516 INFO    MainThread:51023 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:setup_run_log_directory():723] Logging user logs to /Users/a123/Developer/Embroidery_Segmentation/wandb/run-20260615_161413-4tpaf6cl/logs/debug.log
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:setup_run_log_directory():724] Logging internal logs to /Users/a123/Developer/Embroidery_Segmentation/wandb/run-20260615_161413-4tpaf6cl/logs/debug-internal.log
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:init():766] calling init triggers
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:init():771] wandb.init called with sweep_config: {}
+config: {'learning_rate': 0.0001, 'architecture': 'U-Net', 'dataset': 'Embroidery_DST_Binary', 'epochs': 20, 'batch_size': 4, 'image_size': 512, '_wandb': {}}
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:init():814] starting backend
+2026-06-15 16:14:13,517 INFO    MainThread:51023 [wandb_init.py:init():829] sending inform_init request
+2026-06-15 16:14:13,941 INFO    MainThread:51023 [wandb_init.py:init():834] backend started and connected
+2026-06-15 16:14:13,955 INFO    MainThread:51023 [wandb_init.py:init():904] updated telemetry
+2026-06-15 16:14:13,968 INFO    MainThread:51023 [wandb_init.py:init():927] communicating run to backend with 90.0 second timeout
+2026-06-15 16:14:14,406 INFO    MainThread:51023 [wandb_init.py:init():972] starting run threads in backend
+2026-06-15 16:14:14,440 INFO    MainThread:51023 [wandb_run.py:_console_start():2523] atexit reg
+2026-06-15 16:14:14,440 INFO    MainThread:51023 [wandb_run.py:_redirect():2373] redirect: wrap_raw
+2026-06-15 16:14:14,440 INFO    MainThread:51023 [wandb_run.py:_redirect():2442] Wrapping output streams.
+2026-06-15 16:14:14,440 INFO    MainThread:51023 [wandb_run.py:_redirect():2465] Redirects installed.
+2026-06-15 16:14:14,442 INFO    MainThread:51023 [wandb_init.py:init():1010] run started, returning control to user process

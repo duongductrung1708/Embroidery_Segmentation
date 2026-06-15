@@ -1,0 +1,1 @@
+{"_step":1,"Recall/Val":0.625559267878243,"_wandb":{"runtime":967},"_runtime":967,"F1_Score/Train":0.9880629240565452,"Loss/Val":1.8107242383453892,"_timestamp":1.781511807244415e+09,"epoch":2,"Accuracy/Val":0.7658768282187957,"F1_Score/Val":0.7670866198142813,"Accuracy/Train":0.9817781469324124,"Loss/Train":0.16897958105331973,"Recall/Train":0.9790792717890521}
