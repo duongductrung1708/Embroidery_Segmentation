@@ -92,10 +92,13 @@ def process_file_to_patches(filepath, out_img_dir, out_mask_dir):
 # --- CHẠY CHƯƠNG TRÌNH ---
 setup_directories()
 raw_dir = "data/raw"
-dst_files = sorted(glob.glob(f"{raw_dir}/**/*.dst", recursive=True) + glob.glob(f"{raw_dir}/**/*.DST", recursive=True))
+
+# ĐÃ SỬA LỖI TRÙNG LẶP FILE TRÊN WINDOWS
+raw_files = glob.glob(f"{raw_dir}/**/*.dst", recursive=True) + glob.glob(f"{raw_dir}/**/*.DST", recursive=True)
+dst_files = sorted(list(set(raw_files))) # set() sẽ xóa bỏ các đường dẫn bị trùng
 
 total_files = len(dst_files)
-print(f"Tìm thấy tổng cộng {total_files} file .dst")
+print(f"Tìm thấy tổng cộng {total_files} file .dst (Đã loại bỏ trùng lặp)")
 
 # Tự động chia tỷ lệ 80% - 10% - 10%
 train_split = int(total_files * 0.8)
