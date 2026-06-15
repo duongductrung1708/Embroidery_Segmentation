@@ -1,4 +1,41 @@
 Đang sử dụng thiết bị tính toán: mps
 
 Bắt đầu quá trình huấn luyện...
-Epoch [1/20] Train:   2%|███▏                                                                                                                                              | 48/2194 [02:32<1:48:50,  3.04s/it, loss=0.448]
+Epoch [1/20] Train:  46%|██████████████████████████████████████████████████████████████████▏                                                                             | 1008/2194 [55:51<1:05:43,  3.33s/it, loss=0.261]
+Traceback (most recent call last):
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 142, in <module>
+    main()
+    ~~~~^^
+  File "/Users/a123/Developer/Embroidery_Segmentation/train.py", line 72, in main
+    optimizer.step()
+    ~~~~~~~~~~~~~~^^
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/optimizer.py", line 535, in wrapper
+    out = func(*args, **kwargs)
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/optimizer.py", line 80, in _use_grad
+    ret = func(*args, **kwargs)
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/adam.py", line 248, in step
+    adam(
+    ~~~~^
+        params_with_grad,
+        ^^^^^^^^^^^^^^^^^
+    ...<19 lines>...
+        decoupled_weight_decay=group["decoupled_weight_decay"],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/optimizer.py", line 148, in maybe_fallback
+    return func(*args, **kwargs)
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/adam.py", line 970, in adam
+    func(
+    ~~~~^
+        params,
+        ^^^^^^^
+    ...<17 lines>...
+        decoupled_weight_decay=decoupled_weight_decay,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/a123/Developer/Embroidery_Segmentation/venv/lib/python3.14/site-packages/torch/optim/adam.py", line 475, in _single_tensor_adam
+    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)  # type: ignore[arg-type]
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
