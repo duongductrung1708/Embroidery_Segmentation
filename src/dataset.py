@@ -5,31 +5,39 @@ from PIL import Image
 import numpy as np
 
 class EmbroideryDataset(Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
+    def __init__(self, image_dir, mask_dir):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
-        self.transform = transform
-        self.images = [f for f in os.listdir(image_dir) if f.endswith('.jpg')]
+        self.images = sorted([f for f in os.listdir(image_dir) if f.endswith(".png")])
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
         img_name = self.images[idx]
-        mask_name = img_name.replace('.jpg', '.png')
-        
         img_path = os.path.join(self.image_dir, img_name)
-        mask_path = os.path.join(self.mask_dir, mask_name)
+        mask_path = os.path.join(self.mask_dir, img_name)
 
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L") # Ảnh xám
+        # ======================
+        # 1. XỬ LÝ INPUT (ẢNH GỐC VIỀN ĐEN, NỀN TRONG SUỐT)
+        # ======================
+        rgba_img = Image.open(img_path).convert("RGBA")
+        
+        # TRÍCH XUẤT KÊNH ALPHA: Bắt trọn vẹn nét vẽ!
+        # Nét vẽ sẽ thành 255 (Sáng), Nền trong suốt sẽ thành 0 (Tối)
+        alpha_channel = np.array(rgba_img.getchannel("A"), dtype=np.float32)
+        
+        # Thêm chiều (1, H, W) và đưa về khoảng [0, 1]
+        image = torch.tensor(alpha_channel).unsqueeze(0) / 255.0
 
-        if self.transform:
-            image = self.transform(image)
+        # ======================
+        # 2. XỬ LÝ TARGET (MASK ĐÃ TÔ TAY)
+        # ======================
+        mask_img = Image.open(mask_path).convert("L")
+        mask = np.array(mask_img)
+        
+        # Đảm bảo Mask chỉ chứa giá trị 0 (Nền) và 1 (Vùng Fill)
+        mask = (mask > 128).astype(np.uint8)
+        mask = torch.tensor(mask).long()
 
-        # CHUYỂN MÀU TRẮNG (255) THÀNH NHÃN 1 (VÙNG FILL)
-        mask_np = np.array(mask)
-        mask_np[mask_np > 0] = 1 
-        mask_tensor = torch.from_numpy(mask_np).long()
-
-        return image, mask_tensor
+        return image, mask

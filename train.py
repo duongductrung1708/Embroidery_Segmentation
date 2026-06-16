@@ -36,15 +36,20 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"Đang sử dụng thiết bị tính toán: {device}")
 
-    transform = transforms.Compose([transforms.ToTensor()])
+    train_dataset = EmbroideryDataset(
+        image_dir="data/train/images",
+        mask_dir="data/train/masks"
+    )
 
-    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=transform)
-    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=transform)
+    val_dataset = EmbroideryDataset(
+        image_dir="data/test/images",
+        mask_dir="data/test/masks"
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
-    model = UNet(in_channels=3, out_channels=2).to(device)
+    model = UNet(in_channels=1, out_channels=2).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
 

@@ -2,7 +2,7 @@
 # 1. Dữ liệu (Data) - QUAN TRỌNG NHẤT
 # Tuyệt đối không push hàng ngàn ảnh và file thêu lên Git
 # ==========================================
-data/raw/
+# data/raw/
 data/train/
 data/val/
 data/test/
@@ -27,6 +27,7 @@ venv/
 .venv/
 env/
 .env/
+wandb/
 
 # ==========================================
 # 4. Rác của Python & Jupyter Notebook
