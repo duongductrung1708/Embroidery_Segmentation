@@ -41,7 +41,7 @@ def predict_full_image(img_path):
     padded_pred = np.zeros_like(padded_alpha, dtype=np.uint8)
 
     # 4. QUÉT SLIDING WINDOW (Băm -> Nhờ AI đoán -> Ghép lại)
-    print("AI đang cầm cọ tô màu...")
+    print("AI đang nhận diện...")
     with torch.no_grad():
         for y in range(0, padded_alpha.shape[0] - PATCH_SIZE + 1, PATCH_SIZE):
             for x in range(0, padded_alpha.shape[1] - PATCH_SIZE + 1, PATCH_SIZE):
@@ -78,7 +78,7 @@ def predict_full_image(img_path):
 
     # Vẽ ảnh AI đã tô vùng Fill thành MÀU ĐỎ
     plt.subplot(1, 2, 2)
-    plt.title("AI Nhận diện (Vùng Đỏ là Fill/Satin/Tatami)")
+    plt.title("AI Nhận diện (Vùng Đỏ là Fill)")
     overlay = display_img.copy()
     overlay[final_mask == 1] = [255, 0, 0] # Tô đỏ vùng AI dự đoán là Fill
     plt.imshow(overlay)
