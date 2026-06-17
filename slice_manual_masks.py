@@ -11,6 +11,7 @@ import shutil
 PATCH_SIZE = 512
 STRIDE = 256  
 BASE_DIR = "data"
+RESIZE_FACTOR = 0.5  # Thu nhỏ ảnh gốc 50% trước khi băm để lấy được mảng to hơn
 
 def setup_directories():
     """Tạo cấu trúc thư mục chứa dữ liệu đã băm (train/val/test)"""
@@ -35,6 +36,14 @@ def slice_image_and_mask(img_path, mask_path, out_img_dir, out_mask_dir):
     # Cứu hộ: Nếu ảnh gốc nhỡ không có kênh Alpha, ép nó thành BGRA
     if len(img_rgba.shape) == 2 or img_rgba.shape[2] == 3:
         img_rgba = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2BGRA)
+        
+    # --- MỚI THÊM: THU NHỎ ẢNH ĐỂ ÔM ĐƯỢC NHIỀU NGỮ NGHĨA HƠN ---
+    if RESIZE_FACTOR != 1.0:
+        new_w = int(img_rgba.shape[1] * RESIZE_FACTOR)
+        new_h = int(img_rgba.shape[0] * RESIZE_FACTOR)
+        img_rgba = cv2.resize(img_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # LƯU Ý KỸ SƯ: Mask BẮT BUỘC dùng INTER_NEAREST để không bị nhòe viền pixel
+        mask_gray = cv2.resize(mask_gray, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
         
     _, mask_binary = cv2.threshold(mask_gray, 127, 255, cv2.THRESH_BINARY)
     
@@ -74,7 +83,7 @@ if __name__ == "__main__":
     train_split = int(total_files * 0.8)
     val_split = int(total_files * 0.9)
     
-    # Xử lý trường hợp có quá ít ảnh (VD: chỉ có 7 ảnh)
+    # Xử lý trường hợp có quá ít ảnh
     if train_split == total_files:
         train_split = max(1, total_files - 2)
         val_split = total_files - 1

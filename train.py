@@ -21,14 +21,15 @@ def calculate_metrics(tp, fp, fn, tn):
 def main():
     wandb.init(
         project="embroidery-segmentation", 
-        name="binary-fill-metrics",         
+        name="v2-weighted-loss-scheduler", # Đổi tên bài chạy         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U-Net",
-            "dataset": "Embroidery_DST_Binary",
-            "epochs": 20,
+            "dataset": "Embroidery_V2",
+            "epochs": 30, # Tăng nhẹ Epochs để Scheduler có thời gian hoạt động
             "batch_size": 4,
-            "image_size": 512
+            "image_size": 512,
+            "fill_weight": 5.0 # MỚI: Trọng số phạt class Fill
         }
     )
     config = wandb.config 
@@ -50,12 +51,26 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
-    criterion = nn.CrossEntropyLoss()
+    
+    # =========================
+    # VŨ KHÍ 1: PHẠT NẶNG CLASS FILL (Imbalanced Data)
+    # =========================
+    # 0 là Nền/Outline (trọng số 1.0), 1 là Fill (trọng số 5.0)
+    class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
 
-    best_val_f1 = 0.0 # Đổi kỷ lục từ Loss sang F1 (F1 càng cao càng tốt)
+    # =========================
+    # VŨ KHÍ 2: ĐIỀU CHỈNH LEARNING RATE TỰ ĐỘNG (Scheduler)
+    # Tránh Overfitting ở cuối vòng đua
+    # =========================
+    # Nếu trong 3 Epochs mà 'min' Val Loss không giảm -> Lr sẽ nhân cho 0.5
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5, verbose=True)
 
-    print("\nBắt đầu quá trình huấn luyện...")
+    best_val_f1 = 0.0
+
+    print("\nBắt đầu quá trình huấn luyện V2...")
     for epoch in range(config.epochs):
         
         # =========================
@@ -63,7 +78,7 @@ def main():
         # =========================
         model.train()
         running_train_loss = 0.0
-        train_tp = train_fp = train_fn = train_tn = 0 # Bộ đếm Pixel cho Train
+        train_tp = train_fp = train_fn = train_tn = 0 
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
 
@@ -77,15 +92,15 @@ def main():
             optimizer.step()
 
             running_train_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
+            current_lr = optimizer.param_groups[0]['lr'] # Lấy LR hiện tại để log
+            loop.set_postfix(loss=loss.item(), lr=current_lr)
             
-            # Đếm Pixel (Dự đoán vs Thực tế) trên GPU
             with torch.no_grad():
                 preds = torch.argmax(outputs, dim=1)
-                train_tp += ((preds == 1) & (masks == 1)).sum().item() # Đoán là Fill, thực tế là Fill
-                train_fp += ((preds == 1) & (masks == 0)).sum().item() # Đoán là Fill, thực tế là Nền (Đoán lố)
-                train_fn += ((preds == 0) & (masks == 1)).sum().item() # Đoán là Nền, thực tế là Fill (Bỏ sót)
-                train_tn += ((preds == 0) & (masks == 0)).sum().item() # Đoán là Nền, thực tế là Nền
+                train_tp += ((preds == 1) & (masks == 1)).sum().item() 
+                train_fp += ((preds == 1) & (masks == 0)).sum().item() 
+                train_fn += ((preds == 0) & (masks == 1)).sum().item() 
+                train_tn += ((preds == 0) & (masks == 0)).sum().item() 
 
         avg_train_loss = running_train_loss / len(train_loader)
         train_acc, train_prec, train_recall, train_f1 = calculate_metrics(train_tp, train_fp, train_fn, train_tn)
@@ -95,7 +110,7 @@ def main():
         # =========================
         model.eval()
         running_val_loss = 0.0
-        val_tp = val_fp = val_fn = val_tn = 0 # Bộ đếm Pixel cho Val
+        val_tp = val_fp = val_fn = val_tn = 0 
         
         with torch.no_grad():
             for val_images, val_masks in val_loader:
@@ -114,6 +129,9 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         val_acc, val_prec, val_recall, val_f1 = calculate_metrics(val_tp, val_fp, val_fn, val_tn)
 
+        # Cập nhật Scheduler sau mỗi Epoch dựa trên Validation Loss
+        scheduler.step(avg_val_loss)
+
         # =========================
         # BÁO CÁO VÀ GHI LOG WANDB
         # =========================
@@ -123,6 +141,7 @@ def main():
 
         wandb.log({
             "epoch": epoch + 1,
+            "learning_rate": current_lr, # Ghi log cả LR để xem nó giảm lúc nào
             "Loss/Train": avg_train_loss,
             "Loss/Val": avg_val_loss,
             "Accuracy/Train": train_acc,
@@ -133,7 +152,6 @@ def main():
             "F1_Score/Val": val_f1
         })
 
-        # CHÚ Ý: Đánh giá mô hình tốt nhất dựa trên F1-Score của tập Val thay vì Loss
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), "unet_binary_best.pth")
