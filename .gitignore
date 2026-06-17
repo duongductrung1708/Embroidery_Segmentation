@@ -3,9 +3,9 @@
 # Tuyệt đối không push hàng ngàn ảnh và file thêu lên Git
 # ==========================================
 # data/raw/
-data/train/
-data/val/
-data/test/
+# data/train/
+# data/val/
+# data/test/
 
 # ==========================================
 # 2. Trọng số Mô hình (Model Weights)
