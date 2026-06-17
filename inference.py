@@ -89,4 +89,4 @@ def predict_full_image(img_path):
 
 # ĐƯA 1 BỨC ẢNH VÀO ĐÂY ĐỂ TEST
 # Bạn có thể lấy 1 trong 7 ảnh gốc, hoặc 1 ảnh hoàn toàn mới chưa từng tô mask!
-predict_full_image("data/raw/images/14.png")
+predict_full_image("data/raw/images/15.png")
