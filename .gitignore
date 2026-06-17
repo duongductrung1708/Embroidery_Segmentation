@@ -6,9 +6,6 @@
 data/train/
 data/val/
 data/test/
-*.dst
-*.DST
-*.emb
 
 # ==========================================
 # 2. Trọng số Mô hình (Model Weights)
