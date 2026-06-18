@@ -5,7 +5,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-# Giả sử bạn đã có 2 file này trong thư mục src
+# BỘ VŨ KHÍ MỚI: ALBUMENTATIONS
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 from src.dataset import EmbroideryDataset
 from src.model import UNet
 
@@ -13,7 +16,7 @@ from src.model import UNet
 # HÀM TÍNH TOÁN METRICS
 # ==========================================
 def calculate_metrics(tp, fp, fn, tn):
-    epsilon = 1e-7 # Chống chia cho 0
+    epsilon = 1e-7 
     accuracy = (tp + tn) / (tp + tn + fp + fn + epsilon)
     precision = tp / (tp + fp + epsilon)
     recall = tp / (tp + fn + epsilon)
@@ -24,10 +27,9 @@ def calculate_metrics(tp, fp, fn, tn):
 # CHƯƠNG TRÌNH CHÍNH
 # ==========================================
 def main():
-    # 1. Khởi tạo Wandb và Cấu hình
     wandb.init(
         project="embroidery-segmentation", 
-        name="v2-weighted-loss-scheduler-test",         
+        name="v2-augmented-dataset-4workers",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U-Net",
@@ -35,7 +37,7 @@ def main():
             "epochs": 30, 
             "batch_size": 4,
             "image_size": 512,
-            "fill_weight": 5.0 # Trọng số phạt nếu đoán sai class Fill
+            "fill_weight": 5.0 
         }
     )
     config = wandb.config 
@@ -43,30 +45,44 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"Đang sử dụng thiết bị tính toán: {device}")
 
-    # 2. Khai báo 3 tập dữ liệu riêng biệt (Tránh Data Leakage)
-    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks")
-    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks")
-    test_dataset = EmbroideryDataset(image_dir="data/test/images", mask_dir="data/test/masks")
+    # ==========================================
+    # KHAI BÁO DATA AUGMENTATION (TĂNG CƯỜNG DỮ LIỆU)
+    # ==========================================
+    # Tập Train: Lật ngang, lật dọc, xoay 90 độ ngẫu nhiên
+    train_transform = A.Compose([
+        A.HorizontalFlip(p=0.5), # 50% cơ hội lật trái phải
+        A.VerticalFlip(p=0.5),   # 50% cơ hội lật trên xuống
+        A.RandomRotate90(p=0.5), # 50% cơ hội xoay 90 độ
+        ToTensorV2()             # Ép thành Tensor cuối cùng
+    ])
 
+    # Tập Val và Test: KHÔNG ĐƯỢC làm méo ảnh, chỉ ép kiểu Tensor
+    val_test_transform = A.Compose([
+        ToTensorV2()
+    ])
+
+    # Nạp Transform vào Dataset
+    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform)
+    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_test_transform)
+    test_dataset = EmbroideryDataset(image_dir="data/test/images", mask_dir="data/test/masks", transform=val_test_transform)
+
+    # ĐÃ ĐỔI THÀNH 4 WORKERS ĐỂ MAX TỐC ĐỘ 
+    # Đã bật persistent_workers=True để giữ worker sống qua các Epoch
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
-    # 3. Khởi tạo Model, Loss, Optimizer và Scheduler
     model = UNet(in_channels=1, out_channels=2).to(device)
     
-    # Loss có trọng số phạt
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
-
-    # Scheduler không có tham số verbose (tránh lỗi PyTorch mới)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
     best_val_f1 = 0.0
 
-    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN...")
+    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN VỚI 4 WORKERS...")
     for epoch in range(config.epochs):
         
         # ------------------------------------------
@@ -125,7 +141,6 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         val_acc, val_prec, val_recall, val_f1 = calculate_metrics(val_tp, val_fp, val_fn, val_tn)
 
-        # Cập nhật Scheduler và in ra cảnh báo nếu LR bị giảm
         old_lr = optimizer.param_groups[0]['lr']
         scheduler.step(avg_val_loss)
         new_lr = optimizer.param_groups[0]['lr']
@@ -159,13 +174,12 @@ def main():
             wandb.save("unet_binary_best.pth")
 
     # ==========================================
-    # PHA 3: THI ĐẠI HỌC (TEST TRÊN DỮ LIỆU MỚI TINH)
+    # PHA 3: THI ĐẠI HỌC (TEST)
     # ==========================================
     print("\n==============================================")
     print("HOÀN THÀNH HUẤN LUYỆN! BƯỚC VÀO KỲ THI TEST...")
     print("==============================================")
     
-    # Tải lại bộ não có phong độ cao nhất trong quá trình thi thử
     model.load_state_dict(torch.load("unet_binary_best.pth"))
     model.eval()
     
@@ -200,8 +214,5 @@ def main():
     
     wandb.finish() 
 
-# -------------------------------------------------------------
-# DÒNG NÀY LÀ CÁI NÚT BẤM KÍCH HOẠT TẤT CẢ - TUYỆT ĐỐI KHÔNG BỎ
-# -------------------------------------------------------------
 if __name__ == "__main__":
     main()
