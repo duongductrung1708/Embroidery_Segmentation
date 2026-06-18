@@ -132,4 +132,4 @@ def predict_full_image(img_path, save_output=True):
     plt.show()
 
 # CHẠY THỬ VỚI ẢNH CỦA BẠN
-predict_full_image("./data/raw/images/28.png")
+predict_full_image("./test_ready.png")
