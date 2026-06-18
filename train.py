@@ -13,6 +13,29 @@ from src.dataset import EmbroideryDataset
 from src.model import UNet
 
 # ==========================================
+# 1. BỘ VŨ KHÍ MỚI CHỐNG TRÀN VIỀN: DICE LOSS
+# ==========================================
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1e-5):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, inputs, targets):
+        # Lấy xác suất dự đoán của class 1 (Vùng Fill)
+        probs = torch.softmax(inputs, dim=1)[:, 1] 
+        targets_float = targets.float()
+        
+        # Tính độ giao nhau (Intersection) và phần hợp (Union)
+        intersection = (probs * targets_float).sum(dim=(1,2))
+        union = probs.sum(dim=(1,2)) + targets_float.sum(dim=(1,2))
+        
+        # Dice Score: 1 là hoàn hảo, 0 là trật lất
+        dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        
+        # Vì là hàm Loss (cần giảm về 0), ta lấy 1 trừ đi Dice Score
+        return 1.0 - dice.mean()
+
+# ==========================================
 # HÀM TÍNH TOÁN METRICS
 # ==========================================
 def calculate_metrics(tp, fp, fn, tn):
@@ -29,7 +52,7 @@ def calculate_metrics(tp, fp, fn, tn):
 def main():
     wandb.init(
         project="embroidery-segmentation", 
-        name="v2-augmented-dataset-4workers",         
+        name="v3-dice-loss-anti-bleeding",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U-Net",
@@ -37,7 +60,7 @@ def main():
             "epochs": 30, 
             "batch_size": 4,
             "image_size": 512,
-            "fill_weight": 5.0 
+            "fill_weight": 2.0  # ĐÃ HẠ XUỐNG 2.0 ĐỂ AI BỚT THAM LAM
         }
     )
     config = wandb.config 
@@ -48,41 +71,38 @@ def main():
     # ==========================================
     # KHAI BÁO DATA AUGMENTATION (TĂNG CƯỜNG DỮ LIỆU)
     # ==========================================
-    # Tập Train: Lật ngang, lật dọc, xoay 90 độ ngẫu nhiên
     train_transform = A.Compose([
-        A.HorizontalFlip(p=0.5), # 50% cơ hội lật trái phải
-        A.VerticalFlip(p=0.5),   # 50% cơ hội lật trên xuống
-        A.RandomRotate90(p=0.5), # 50% cơ hội xoay 90 độ
-        ToTensorV2()             # Ép thành Tensor cuối cùng
+        A.HorizontalFlip(p=0.5), 
+        A.VerticalFlip(p=0.5),   
+        A.RandomRotate90(p=0.5), 
+        ToTensorV2()             
     ])
 
-    # Tập Val và Test: KHÔNG ĐƯỢC làm méo ảnh, chỉ ép kiểu Tensor
     val_test_transform = A.Compose([
         ToTensorV2()
     ])
 
-    # Nạp Transform vào Dataset
     train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform)
     val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_test_transform)
     test_dataset = EmbroideryDataset(image_dir="data/test/images", mask_dir="data/test/masks", transform=val_test_transform)
 
-    # ĐÃ ĐỔI THÀNH 4 WORKERS ĐỂ MAX TỐC ĐỘ 
-    # Đã bật persistent_workers=True để giữ worker sống qua các Epoch
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
     
+    # KẾT HỢP 2 HÀM LOSS: CrossEntropy (Cơ bản) + Dice Loss (Chống tràn viền)
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    dice_loss_fn = DiceLoss()
     
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
     best_val_f1 = 0.0
 
-    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN VỚI 4 WORKERS...")
+    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN V3 (DICE LOSS)...")
     for epoch in range(config.epochs):
         
         # ------------------------------------------
@@ -99,7 +119,12 @@ def main():
             
             optimizer.zero_grad()
             outputs = model(images)
-            loss = criterion(outputs, masks)
+            
+            # TÍNH TỔNG 2 LOSS
+            loss_ce = ce_loss_fn(outputs, masks)
+            loss_dice = dice_loss_fn(outputs, masks)
+            loss = loss_ce + loss_dice # Gộp sức mạnh
+            
             loss.backward()
             optimizer.step()
 
@@ -129,7 +154,11 @@ def main():
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
                 
                 val_outputs = model(val_images)
-                val_loss = criterion(val_outputs, val_masks)
+                
+                # Tính tổng loss Val
+                v_loss_ce = ce_loss_fn(val_outputs, val_masks)
+                v_loss_dice = dice_loss_fn(val_outputs, val_masks)
+                val_loss = v_loss_ce + v_loss_dice
                 running_val_loss += val_loss.item()
 
                 preds = torch.argmax(val_outputs, dim=1)
@@ -151,8 +180,8 @@ def main():
         # BÁO CÁO VÀ GHI LOG WANDB
         # ------------------------------------------
         print(f"\n[Epoch {epoch+1}] Báo cáo:")
-        print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
-        print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
+        print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
+        print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
 
         wandb.log({
             "epoch": epoch + 1,
@@ -161,6 +190,8 @@ def main():
             "Loss/Val": avg_val_loss,
             "Accuracy/Train": train_acc,
             "Accuracy/Val": val_acc,
+            "Precision/Train": train_prec,
+            "Precision/Val": val_prec,
             "Recall/Train": train_recall,
             "Recall/Val": val_recall,
             "F1_Score/Train": train_f1,
