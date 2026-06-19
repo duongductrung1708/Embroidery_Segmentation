@@ -73,34 +73,41 @@ def main():
     print(f"Đang sử dụng thiết bị tính toán: {device}")
 
     # ==========================================
-    # 2. KHAI BÁO DATA AUGMENTATION (BẢN PRO)
+    # KHAI BÁO DATA AUGMENTATION (Cú pháp Albumentations mới nhất)
     # ==========================================
     train_transform = A.Compose([
-        # Cắt thông minh: Ưu tiên nhắm vào chỗ có nét vẽ
         A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size), 
-        
-        # Lật ảnh cơ bản
         A.HorizontalFlip(p=0.5), 
         A.VerticalFlip(p=0.5),   
         
-        # Xoay tự do & Dịch chuyển (Đắp viền đen)
-        A.ShiftScaleRotate(
-            shift_limit=0.0625, scale_limit=0.15, rotate_limit=180, 
-            interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_CONSTANT, 
-            value=0, mask_value=0, p=0.7
+        # Dùng Affine thay cho ShiftScaleRotate cũ
+        A.Affine(
+            translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)},
+            scale=(0.85, 1.15), 
+            rotate=(-180, 180), 
+            interpolation=cv2.INTER_LINEAR, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            fill=0,         # Đã đổi từ value=0 thành fill=0
+            fill_mask=0,    # Đã đổi từ mask_value=0 thành fill_mask=0
+            p=0.7
         ),
 
-        # Biến dạng đàn hồi (Elastic) - Uốn cong nét vẽ
         A.ElasticTransform(
-            alpha=1, sigma=50, alpha_affine=50, 
-            border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=0.3
+            alpha=1, sigma=50, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            fill=0,         # Cú pháp mới
+            fill_mask=0,    # Cú pháp mới
+            p=0.3
         ),
 
-        # Giả lập đứt nét / Mất chi tiết (Khoét lỗ đen)
+        # Cú pháp CoarseDropout mới
         A.CoarseDropout(
-            max_holes=8, max_height=32, max_width=32, 
-            min_holes=2, min_height=8, min_width=8,
-            fill_value=0, mask_fill_value=0, p=0.3
+            num_holes_range=(2, 8),          # Tên mới
+            hole_height_range=(8, 32),       # Tên mới
+            hole_width_range=(8, 32),        # Tên mới
+            fill=0,                          # Tên mới
+            fill_mask=0,                     # Tên mới
+            p=0.3
         ),
 
         ToTensorV2()             
