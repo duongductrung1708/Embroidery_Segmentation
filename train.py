@@ -7,52 +7,16 @@ import wandb
 import os
 import cv2
 
-# BỘ VŨ KHÍ AUGMENTATION HẠNG NẶNG
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from src.dataset import EmbroideryDataset
 from src.model import UNet
+from src.utils import DiceLoss, calculate_metrics, seed_everything
 
-# ==========================================
-# 1. BỘ VŨ KHÍ CHỐNG TRÀN VIỀN: DICE LOSS
-# ==========================================
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1e-5):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-
-    def forward(self, inputs, targets):
-        # Lấy xác suất dự đoán của class 1 (Vùng Fill)
-        probs = torch.softmax(inputs, dim=1)[:, 1] 
-        targets_float = targets.float()
-        
-        # Tính độ giao nhau (Intersection) và phần hợp (Union)
-        intersection = (probs * targets_float).sum(dim=(1,2))
-        union = probs.sum(dim=(1,2)) + targets_float.sum(dim=(1,2))
-        
-        # Dice Score: 1 là hoàn hảo, 0 là trật lất
-        dice = (2. * intersection + self.smooth) / (union + self.smooth)
-        
-        # Vì là hàm Loss (cần giảm về 0), ta lấy 1 trừ đi Dice Score
-        return 1.0 - dice.mean()
-
-# ==========================================
-# HÀM TÍNH TOÁN METRICS
-# ==========================================
-def calculate_metrics(tp, fp, fn, tn):
-    epsilon = 1e-7 
-    accuracy = (tp + tn) / (tp + tn + fp + fn + epsilon)
-    precision = tp / (tp + fp + epsilon)
-    recall = tp / (tp + fn + epsilon)
-    f1 = 2 * (precision * recall) / (precision + recall + epsilon)
-    return accuracy, precision, recall, f1
-
-# ==========================================
-# CHƯƠNG TRÌNH CHÍNH
-# ==========================================
 def main():
-    # Khởi tạo Weights & Biases để theo dõi
+    seed_everything(42)
+
     wandb.init(
         project="embroidery-segmentation", 
         name="v4-pro-augmentation-onthefly",         
@@ -64,7 +28,7 @@ def main():
             "batch_size": 4,
             "image_size": 512,
             "fill_weight": 2.0,
-            "crops_per_image": 20 # 1 ảnh gốc sẽ được cắt 20 lần ngẫu nhiên trong 1 Epoch
+            "crops_per_image": 20 
         }
     )
     config = wandb.config 
@@ -72,93 +36,67 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"Đang sử dụng thiết bị tính toán: {device}")
 
-    # ==========================================
-    # KHAI BÁO DATA AUGMENTATION (Cú pháp Albumentations mới nhất)
-    # ==========================================
+    # Khai báo Transform
     train_transform = A.Compose([
-        A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size), 
+        A.OneOf([
+            A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size, p=0.8),
+            A.RandomCrop(width=config.image_size, height=config.image_size, p=0.2),
+        ], p=1.0),
         A.HorizontalFlip(p=0.5), 
         A.VerticalFlip(p=0.5),   
-        
-        # Dùng Affine thay cho ShiftScaleRotate cũ
-        A.Affine(
-            translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)},
-            scale=(0.85, 1.15), 
-            rotate=(-180, 180), 
-            interpolation=cv2.INTER_LINEAR, 
-            border_mode=cv2.BORDER_CONSTANT, 
-            fill=0,         # Đã đổi từ value=0 thành fill=0
-            fill_mask=0,    # Đã đổi từ mask_value=0 thành fill_mask=0
-            p=0.7
-        ),
-
-        A.ElasticTransform(
-            alpha=1, sigma=50, 
-            border_mode=cv2.BORDER_CONSTANT, 
-            fill=0,         # Cú pháp mới
-            fill_mask=0,    # Cú pháp mới
-            p=0.3
-        ),
-
-        # Cú pháp CoarseDropout mới
-        A.CoarseDropout(
-            num_holes_range=(2, 8),          # Tên mới
-            hole_height_range=(8, 32),       # Tên mới
-            hole_width_range=(8, 32),        # Tên mới
-            fill=0,                          # Tên mới
-            fill_mask=0,                     # Tên mới
-            p=0.3
-        ),
-
+        A.Affine(translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)}, scale=(0.85, 1.15), rotate=(-180, 180), interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.7),
+        A.ElasticTransform(alpha=1, sigma=50, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.3),
+        A.CoarseDropout(num_holes_range=(2, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), fill=0, fill_mask=0, p=0.3),
         ToTensorV2()             
     ])
 
     val_transform = A.Compose([
-        # Validation cũng cắt vào chỗ có nét vẽ để đánh giá F1 cho chuẩn
         A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size),
         ToTensorV2()
     ])
 
-    # ==========================================
-    # 3. NẠP DỮ LIỆU (ON-THE-FLY)
-    # ==========================================
-    train_dataset = EmbroideryDataset(
-        image_dir="data/train/images", 
-        mask_dir="data/train/masks", 
-        transform=train_transform,
-        resize_factor=0.5,
-        crops_per_image=config.crops_per_image
-    )
-    
-    val_dataset = EmbroideryDataset(
-        image_dir="data/val/images", 
-        mask_dir="data/val/masks", 
-        transform=val_transform,
-        resize_factor=0.5,
-        crops_per_image=max(1, config.crops_per_image // 2)
-    )
+    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform, resize_factor=0.5, crops_per_image=config.crops_per_image)
+    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=max(1, config.crops_per_image // 2))
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
     
-    # Kết hợp CE Loss và Dice Loss
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     dice_loss_fn = DiceLoss()
     
+    # Khởi tạo Optimizer ban đầu
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
+    # ĐỊNH NGHĨA FILE CHỐNG SẬP TUYỆT ĐỐI
+    LAST_CHECKPOINT_PATH = "unet_binary_last.pth"
+    BEST_MODEL_PATH = "unet_binary_best.pth"
+    
+    start_epoch = 0
     best_val_f1 = 0.0
 
-    print("\nBẮT ĐẦU HUẤN LUYỆN V4 PRO (ON-THE-FLY & ADVANCED AUGMENTATION)...")
-    for epoch in range(config.epochs):
+    # KIỂM TRA PHỤC HỒI SAU SẬP
+    if os.path.exists(LAST_CHECKPOINT_PATH):
+        print(f"\n[PHỤC HỒI] Phát hiện sự cố sập nguồn trước đó. Đang khôi phục tiến trình từ '{LAST_CHECKPOINT_PATH}'...")
+        checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
         
-        # ------------------------------------------
-        # PHA 1: HỌC TẬP (TRAIN)
-        # ------------------------------------------
+        # Nạp lại tạ model, trạng thái optimizer và mốc Epoch đang chạy dở
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_f1 = checkpoint.get('best_val_f1', 0.0)
+        
+        print(f"-> Khôi phục thành công! Sẽ chạy tiếp từ Epoch {start_epoch + 1} với đầy đủ trí nhớ Gradient.")
+    else:
+        print("\nKhông phát hiện sự cố cũ. Bắt đầu huấn luyện từ Epoch 1.")
+
+    print("\nBẮT ĐẦU HUẤN LUYỆN V4 PRO...")
+    for epoch in range(start_epoch, config.epochs):
+        
+        # Pha Train
         model.train()
         running_train_loss = 0.0
         train_tp = train_fp = train_fn = train_tn = 0 
@@ -171,7 +109,6 @@ def main():
             optimizer.zero_grad()
             outputs = model(images)
             
-            # Tính tổng 2 Loss
             loss_ce = ce_loss_fn(outputs, masks)
             loss_dice = dice_loss_fn(outputs, masks)
             loss = loss_ce + loss_dice 
@@ -193,9 +130,7 @@ def main():
         avg_train_loss = running_train_loss / len(train_loader)
         train_acc, train_prec, train_recall, train_f1 = calculate_metrics(train_tp, train_fp, train_fn, train_tn)
 
-        # ------------------------------------------
-        # PHA 2: THI THỬ (VALIDATION)
-        # ------------------------------------------
+        # Pha Validation
         model.eval()
         running_val_loss = 0.0
         val_tp = val_fp = val_fn = val_tn = 0 
@@ -203,7 +138,6 @@ def main():
         with torch.no_grad():
             for val_images, val_masks in val_loader:
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
-                
                 val_outputs = model(val_images)
                 
                 v_loss_ce = ce_loss_fn(val_outputs, val_masks)
@@ -220,45 +154,39 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         val_acc, val_prec, val_recall, val_f1 = calculate_metrics(val_tp, val_fp, val_fn, val_tn)
 
-        # Giảm Learning Rate nếu Loss đi ngang
-        old_lr = optimizer.param_groups[0]['lr']
         scheduler.step(avg_val_loss)
-        new_lr = optimizer.param_groups[0]['lr']
-        if new_lr < old_lr:
-            print(f"\nCảnh báo: Val Loss đi ngang, Learning Rate giảm xuống: {new_lr}")
 
-        # ------------------------------------------
-        # BÁO CÁO VÀ GHI LOG WANDB
-        # ------------------------------------------
         print(f"\n[Epoch {epoch+1}] Báo cáo:")
-        print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
-        print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
+        print(f"   Train | Loss: {avg_train_loss:.4f} | F1: {train_f1:.4f}")
+        print(f"   Val   | Loss: {avg_val_loss:.4f} | F1: {val_f1:.4f}\n")
 
         wandb.log({
-            "epoch": epoch + 1,
-            "learning_rate": current_lr,
-            "Loss/Train": avg_train_loss,
-            "Loss/Val": avg_val_loss,
-            "Accuracy/Train": train_acc,
-            "Accuracy/Val": val_acc,
-            "Precision/Train": train_prec,
-            "Precision/Val": val_prec,
-            "Recall/Train": train_recall,
-            "Recall/Val": val_recall,
-            "F1_Score/Train": train_f1,
-            "F1_Score/Val": val_f1
+            "epoch": epoch + 1, "learning_rate": current_lr,
+            "Loss/Train": avg_train_loss, "Loss/Val": avg_val_loss,
+            "F1_Score/Train": train_f1, "F1_Score/Val": val_f1
         })
 
-        # Lưu Checkpoint tốt nhất
+        # HÀNH ĐỘNG 1: CỨ CUỐI ĐÊM LÀ GHI NHẬT KÝ (Lưu trạng thái Last để chống sập)
+        checkpoint_last = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_val_f1': best_val_f1
+        }
+        torch.save(checkpoint_last, LAST_CHECKPOINT_PATH)
+
+        # HÀNH ĐỘNG 2: LƯU KỶ LỤC HOÀNG KIM (Best Model giữ nguyên chỉ lưu weights để đem đi Inference)
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
-            torch.save(model.state_dict(), "unet_binary_best.pth")
+            torch.save(model.state_dict(), BEST_MODEL_PATH)
             print(f"Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
-            wandb.save("unet_binary_best.pth")
+            wandb.save(BEST_MODEL_PATH)
 
-    print("\n==============================================")
-    print("HOÀN THÀNH HUẤN LUYỆN!")
-    print("==============================================")
+    # Train xong xuôi an toàn thì xóa file Nhật ký chống sập đi
+    if os.path.exists(LAST_CHECKPOINT_PATH):
+        os.remove(LAST_CHECKPOINT_PATH)
+
+    print("\nHOÀN THÀNH HUẤN LUYỆN!")
     wandb.finish() 
 
 if __name__ == "__main__":
