@@ -192,7 +192,7 @@ def main():
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), "unet_binary_best.pth")
-            print(f"🌟 Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
+            print(f"Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
             wandb.save("unet_binary_best.pth")
 
     print("\n==============================================")

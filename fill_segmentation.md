@@ -1,57 +1,53 @@
-# Pipeline Giai đoạn 1: Binary Fill Segmentation (Nhận diện Mảng Thêu)
+# Pipeline Giai đoạn 1 (V3 - Production): Binary Fill Segmentation & Satin Boundary Extraction
 
-**Mục tiêu:** Xây dựng Baseline Model có khả năng phân tách chính xác vùng mảng thêu đặc (Fill) ra khỏi hình nền (Background) và các đường chỉ viền rời rạc (Run/Outline), giải quyết bài toán thiếu Ground Truth chuẩn từ file `.emb`.
-
----
-
-## Khâu 1: Auto-Labeling & Data Generation (`generate_dataset.py`)
-
-Biến đổi trực tiếp từ tọa độ "mã máy khâu" (`.dst`) thành bộ dữ liệu ảnh sắc nét bằng thuật toán Thị giác máy tính (OpenCV) hoàn toàn tự động.
-
-1. **Khởi tạo 2 bản vẽ song song:**
-   - _Ảnh Input (Cho AI học):_ Vẽ nét mập (`thickness=2`) để mô phỏng bề mặt sợi chỉ thực tế.
-   - _Ảnh Nháp (Để làm Mask):_ Vẽ nét mảnh (`thickness=1`) để tính toán mật độ không gian.
-2. **Kỹ thuật Cắt râu Outline (OpenCV Morphology):**
-   - **`MORPH_CLOSE` (Kernel 11x11):** Phình to rồi co lại. Ép các nét thêu đan xen sát nhau dính chặt lại thành một vùng Fill.
-   - **`MORPH_OPEN` (Kernel 5x5):** Co lại rồi phình ra. Cắt đứt các đường chỉ Outline mỏng manh dính vào vùng Fill.
-3. **Lọc nhiễu (Area Filter):** Dùng `cv2.contourArea`, thẳng tay xóa bỏ mọi mảng có diện tích `< 3000` pixel (chỉ giữ lại khối Fill khổng lồ).
-4. **Cắt lát (Sliding Window):** Quét khung `512x512` qua bức tranh khổng lồ.
-   - **Đầu ra:** Hàng ngàn cặp ảnh Train/Val/Test với Mask chỉ có 2 màu: Đen (0) và Trắng (255).
+**Mục tiêu:** Xây dựng hệ thống Trí tuệ Nhân tạo có khả năng nhận thức sắc nét vùng mảng thêu (Fill) từ ảnh phác thảo, đồng thời tích hợp Toán thái học Hình học (Computational Geometry) để trích xuất trực tiếp các đường viền Vector Satin siêu mảnh, sẵn sàng cho việc sinh mã máy thêu.
 
 ---
 
-## Khâu 2: Tiền xử lý Tensor (`dataset.py`)
+## Khâu 1: Chuẩn bị Dữ liệu Vàng & Băm ảnh (`slice_image.py`)
 
-Băng chuyền tiêu chuẩn hóa dữ liệu trước khi đẩy vào GPU.
+Loại bỏ dữ liệu rác, tập trung vào số lượng nhỏ các "Mẫu Vàng" (Golden Samples) tự tô mask, và tối ưu hóa không gian ngữ nghĩa cho AI.
 
-- Đọc ảnh Mask bằng chuẩn Grayscale (Xám).
-- **Ép nhãn (Labeling):** Thuật toán `mask_np[mask_np > 0] = 1` ép toàn bộ các pixel màu Trắng (255) về nhãn số `1`.
-- **Đầu ra Mask Tensor:** Ma trận số nguyên chuẩn PyTorch chỉ chứa giá trị `0` (Nền) và `1` (Fill).
-
----
-
-## Khâu 3: Kiến trúc Mạng & Đào tạo (`model.py` & `train.py`)
-
-Tối ưu hóa U-Net cho bài toán Nhị phân (Binary) và giám sát chất lượng cấp độ Pixel.
-
-1. **Thu hẹp Cửa ra:** Thiết lập `out_channels=2` cho mạng U-Net gốc.
-2. **Giám sát từng Pixel (Micro-metrics):** Đo lường True Positive, False Positive, True Negative, False Negative trên tổng số 262,144 pixel của mỗi bức ảnh.
-3. **Chỉ số đánh giá cốt lõi:**
-   - Bỏ qua _Accuracy_ (vì bị nhiễu do nền đen quá lớn).
-   - Tập trung đo lường **Recall** (Tỷ lệ bắt trúng Fill) và **F1-Score** (Sự cân bằng hoàn hảo).
-4. **Weights & Biases (W&B):** Ghi log Loss liên tục theo từng Batch và vẽ biểu đồ Validation Metrics lên Cloud theo thời gian thực.
-5. **Tiêu chuẩn Kỷ lục (Checkpointing):** Tự động lưu mô hình `unet_binary_best.pth` dựa trên **F1-Score của tập Validation cao nhất** thay vì Loss thấp nhất.
+1. **Khởi tạo Dữ liệu Vàng:** Sử dụng các ảnh gốc đa dạng (Động vật, Typography/Chữ) được tô Mask thủ công cực kỳ cẩn thận (Mask nằm lọt thỏm trong viền đen) để tránh dạy AI thói quen "tràn viền".
+2. **Kỹ thuật Đồng bộ Scale (Resize Factor):**
+   - Thu nhỏ ảnh gốc và ảnh Mask (Ví dụ: `RESIZE_FACTOR = 0.5`) trước khi băm. Giúp khung quét `512x512` ôm trọn được ngữ cảnh lớn hơn của bức tranh.
+   - *Lưu ý cơ học:* Thu nhỏ Mask bắt buộc dùng `cv2.INTER_NEAREST` để giữ viền nhị phân cứng cáp, không bị nội suy mờ nhòe.
+3. **Bộ lọc Không gian trống:** Chỉ lưu các bản vá (patch) chứa nét vẽ gốc (Alpha > 0) hoặc có mảng Mask (> 0), vứt bỏ hoàn toàn nền trong suốt để tiết kiệm dung lượng.
+4. **Chiến lược "Small Data Era":** Cắt bỏ hoàn toàn tập Test, dồn toàn lực dữ liệu theo tỷ lệ **Train (80%) - Val (20%)** để mô hình hội tụ tốt nhất trong bối cảnh dữ liệu khan hiếm.
 
 ---
 
-## Khâu 4: Dự đoán Thực chiến (`inference.py`)
+## Khâu 2: Tiền xử lý & Tăng cường Dữ liệu (`dataset.py`)
 
-Đưa mô hình vào kiểm thử trực quan với ảnh mới.
+Băng chuyền tiêu chuẩn hóa và "bơm" thêm dữ liệu (Data Augmentation) để chống học vẹt (Overfitting).
 
-1. **Phong ấn trọng số:** Bật `model.eval()` và `torch.no_grad()` để tối đa hóa tốc độ.
-2. **Bóc tách xác suất:** Dùng `torch.argmax(dim=1)` để chốt kết quả tại từng pixel (Là 0 hay 1?).
-3. **Tô màu báo cáo (Color Mapping):** - Nhãn `0` $\rightarrow$ Đổ màu Đen (Nền).
-   - Nhãn `1` $\rightarrow$ Đổ màu Xanh lá (Vùng Fill mảng thêu).
-4. **Kết quả:** Hiển thị song song ảnh bề mặt thêu gốc và ảnh Mask đã được AI làm sạch hoàn toàn râu ria, sẵn sàng làm tiền đề cho Giai đoạn 2 (Nhận diện Satin/Tatami).
+1. **Ép nhãn (Labeling):** Thuật toán `mask_np[mask_np > 0] = 1` ép toàn bộ pixel vùng Fill về class 1, Background về class 0.
+2. **Albumentations (Tăng cường dữ liệu cường độ cao):** - Tập Train được áp dụng các phép biến đổi ngẫu nhiên: *HorizontalFlip (Lật ngang), VerticalFlip (Lật dọc), RandomRotate90 (Xoay 90 độ)*. Giúp 1 bức ảnh sinh ra nhiều biến thể.
+   - Tập Val được giữ nguyên bản.
+3. **Tối ưu hóa GPU:** Đẩy luồng tải dữ liệu qua 4 công nhân độc lập (`num_workers=4`) với `persistent_workers=True` để GPU không bao giờ bị thiếu data.
 
-![Ảnh result](result_full_inference.png)
+---
+
+## Khâu 3: Kiến trúc Mạng & Huấn luyện (Loss Kép) (`train.py`)
+
+Khắc phục triệt để bệnh "Tham lam" (Over-segmentation / Tràn viền) bằng cách thay đổi luật chơi của AI.
+
+1. **Chữa bệnh Tham lam (Weighted Loss):** Hạ trọng số phạt `fill_weight` từ `5.0` xuống `2.0`. Mạng U-Net sẽ không còn ám ảnh việc "thà tô lố còn hơn bỏ sót", giúp ranh giới bám khít nét viền đen.
+2. **Vũ khí tối thượng - Loss Kép (Hybrid Loss):**
+   - **CrossEntropy Loss:** Chấm điểm cứng nhắc trên từng pixel.
+   - **Dice Loss:** Chấm điểm dựa trên độ khớp (IoU) của cả một mảng diện tích lớn. Ép mảng trắng phải ôm sát ranh giới viền đen tuyệt đối. Tổng Loss = CE Loss + Dice Loss.
+3. **Giám sát W&B:** Ghi log toàn bộ hệ thống (Loss, Accuracy, Precision, Recall, F1-Score) lên Cloud W&B theo thời gian thực. Lưu checkpoint `unet_binary_best.pth` tự động tại Epoch có Val F1-Score cao nhất.
+
+---
+
+## Khâu 4: Hậu xử lý Toán thái học & Trích xuất Vector (`inference_satin_border.py`)
+
+Biến mảng Mask Trắng/Đen thô kệch thành các đường nét tinh tế, tách biệt chuẩn kỹ thuật thêu vi tính.
+
+1. **Đồng bộ Scale & Padding:** Ảnh thực tế được Resize (`0.5`) giống hệt lúc Train, đệm viền (Padding) cho chia hết `512`, cho U-Net quét, sau đó phóng to Mask trả lại kích thước gốc nguyên bản.
+2. **Xác suất tự tin (Softmax Thresholding):** Loại bỏ `argmax` dễ dãi. Dùng `torch.softmax`, AI phải tự tin `> 50%` (với model V3 đã rất chuẩn) mới được tô màu Fill.
+3. **Chuỗi Kỹ thuật Trích xuất biên Satin (Advanced Morphology):**
+   - **Vá lỗ (`MORPH_CLOSE`):** Đảm bảo mảng Fill đặc ruột, không đứt gãy.
+   - **Cưỡng ép Tách nét (`Erosion`):** Đánh sập các "cây cầu" pixel đang dính lẹo giữa 2 mảng Fill nằm sát nhau, tạo khoảng hở không gian cho kim thêu.
+   - **Trích xuất viền bên trong (`Boundary Extraction`):** Thu nhỏ mảng vừa tách thêm 1 lần nữa, lấy mảng ngoài TRỪ đi mảng trong. Phép toán này tạo ra các dải phân cách mảnh mai (2-3 pixel) mô phỏng chính xác đường chạy kim mũi Satin.
+4. **Kết quả cuối cùng:** Trả ra file `AI_Satin_Borders.png` sắc lẹm, sẵn sàng đưa vào thuật toán tìm tọa độ `cv2.findContours` và nội suy đường cong `Shapely` ở Giai đoạn 2.
