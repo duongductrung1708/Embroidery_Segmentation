@@ -21,18 +21,13 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, inputs, targets):
-        # Lấy xác suất dự đoán của class 1 (Vùng Fill)
         probs = torch.softmax(inputs, dim=1)[:, 1] 
         targets_float = targets.float()
         
-        # Tính độ giao nhau (Intersection) và phần hợp (Union)
         intersection = (probs * targets_float).sum(dim=(1,2))
         union = probs.sum(dim=(1,2)) + targets_float.sum(dim=(1,2))
         
-        # Dice Score: 1 là hoàn hảo, 0 là trật lất
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
-        
-        # Vì là hàm Loss (cần giảm về 0), ta lấy 1 trừ đi Dice Score
         return 1.0 - dice.mean()
 
 # ==========================================
@@ -52,15 +47,15 @@ def calculate_metrics(tp, fp, fn, tn):
 def main():
     wandb.init(
         project="embroidery-segmentation", 
-        name="v3-dice-loss-anti-bleeding",         
+        name="v3-dice-loss-no-test-set",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U-Net",
             "dataset": "Embroidery_V2",
-            "epochs": 30, 
+            "epochs": 50,
             "batch_size": 4,
             "image_size": 512,
-            "fill_weight": 2.0  # ĐÃ HẠ XUỐNG 2.0 ĐỂ AI BỚT THAM LAM
+            "fill_weight": 2.0  
         }
     )
     config = wandb.config 
@@ -78,21 +73,19 @@ def main():
         ToTensorV2()             
     ])
 
-    val_test_transform = A.Compose([
+    val_transform = A.Compose([
         ToTensorV2()
     ])
 
+    # CHỈ CÒN TRAIN VÀ VAL
     train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform)
-    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_test_transform)
-    test_dataset = EmbroideryDataset(image_dir="data/test/images", mask_dir="data/test/masks", transform=val_test_transform)
+    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_transform)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
-    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
     
-    # KẾT HỢP 2 HÀM LOSS: CrossEntropy (Cơ bản) + Dice Loss (Chống tràn viền)
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     dice_loss_fn = DiceLoss()
@@ -102,7 +95,7 @@ def main():
 
     best_val_f1 = 0.0
 
-    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN V3 (DICE LOSS)...")
+    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN V3 (CHỈ TRAIN VÀ VAL)...")
     for epoch in range(config.epochs):
         
         # ------------------------------------------
@@ -120,10 +113,9 @@ def main():
             optimizer.zero_grad()
             outputs = model(images)
             
-            # TÍNH TỔNG 2 LOSS
             loss_ce = ce_loss_fn(outputs, masks)
             loss_dice = dice_loss_fn(outputs, masks)
-            loss = loss_ce + loss_dice # Gộp sức mạnh
+            loss = loss_ce + loss_dice 
             
             loss.backward()
             optimizer.step()
@@ -155,7 +147,6 @@ def main():
                 
                 val_outputs = model(val_images)
                 
-                # Tính tổng loss Val
                 v_loss_ce = ce_loss_fn(val_outputs, val_masks)
                 v_loss_dice = dice_loss_fn(val_outputs, val_masks)
                 val_loss = v_loss_ce + v_loss_dice
@@ -201,48 +192,12 @@ def main():
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), "unet_binary_best.pth")
-            print(f"Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
+            print(f"🌟 Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
             wandb.save("unet_binary_best.pth")
 
-    # ==========================================
-    # PHA 3: THI ĐẠI HỌC (TEST)
-    # ==========================================
     print("\n==============================================")
-    print("HOÀN THÀNH HUẤN LUYỆN! BƯỚC VÀO KỲ THI TEST...")
+    print("HOÀN THÀNH HUẤN LUYỆN!")
     print("==============================================")
-    
-    model.load_state_dict(torch.load("unet_binary_best.pth"))
-    model.eval()
-    
-    test_tp = test_fp = test_fn = test_tn = 0 
-    
-    with torch.no_grad():
-        for test_images, test_masks in tqdm(test_loader, desc="Đang chấm bài Test..."):
-            test_images, test_masks = test_images.to(device), test_masks.to(device)
-            
-            test_outputs = model(test_images)
-            preds = torch.argmax(test_outputs, dim=1)
-            
-            test_tp += ((preds == 1) & (test_masks == 1)).sum().item()
-            test_fp += ((preds == 1) & (test_masks == 0)).sum().item()
-            test_fn += ((preds == 0) & (test_masks == 1)).sum().item()
-            test_tn += ((preds == 0) & (test_masks == 0)).sum().item()
-            
-    test_acc, test_prec, test_recall, test_f1 = calculate_metrics(test_tp, test_fp, test_fn, test_tn)
-
-    print("\nKẾT QUẢ ĐÁNH GIÁ TRÊN TẬP TEST (UNSEEN DATA):")
-    print(f"   Accuracy : {test_acc:.4f}")
-    print(f"   Precision: {test_prec:.4f}")
-    print(f"   Recall   : {test_recall:.4f}")
-    print(f"   F1-Score : {test_f1:.4f}\n")
-    
-    wandb.log({
-        "Test/Accuracy": test_acc,
-        "Test/Precision": test_prec,
-        "Test/Recall": test_recall,
-        "Test/F1_Score": test_f1
-    })
-    
     wandb.finish() 
 
 if __name__ == "__main__":
