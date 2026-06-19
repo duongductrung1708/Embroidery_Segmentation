@@ -62,36 +62,53 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
-    
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     dice_loss_fn = DiceLoss()
     
-    # Khởi tạo Optimizer ban đầu
-    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
-
-    # ĐỊNH NGHĨA FILE CHỐNG SẬP TUYỆT ĐỐI
     LAST_CHECKPOINT_PATH = "unet_binary_last.pth"
     BEST_MODEL_PATH = "unet_binary_best.pth"
     
     start_epoch = 0
     best_val_f1 = 0.0
+    active_lr = config.learning_rate
 
-    # KIỂM TRA PHỤC HỒI SAU SẬP
+    # Khởi tạo Optimizer ban đầu
+    optimizer = optim.Adam(model.parameters(), lr=active_lr)
+
+    # ==========================================
+    # CƠ CHẾ 2 TRONG 1: CHỐNG SẬP & FINE-TUNE
+    # ==========================================
     if os.path.exists(LAST_CHECKPOINT_PATH):
-        print(f"\n[PHỤC HỒI] Phát hiện sự cố sập nguồn trước đó. Đang khôi phục tiến trình từ '{LAST_CHECKPOINT_PATH}'...")
-        checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
+        try:
+            print(f"\n[PHỤC HỒI] Phát hiện sự cố sập nguồn. Đang khôi phục từ '{LAST_CHECKPOINT_PATH}'...")
+            checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
+            
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_f1 = checkpoint.get('best_val_f1', 0.0)
+            print(f"-> Thành công! Sẽ chạy tiếp từ Epoch {start_epoch + 1}.")
+        except KeyError:
+            print(f"\nLỖI: File '{LAST_CHECKPOINT_PATH}' bị sai định dạng nhật ký!")
+            print("-> Hãy xóa file 'unet_binary_last.pth' đi và chạy lại.")
+            exit()
+            
+    elif os.path.exists(BEST_MODEL_PATH):
+        print(f"\n[FINE-TUNE] Phát hiện tạ cũ '{BEST_MODEL_PATH}'. Nạp trí nhớ để học thêm ảnh mới...")
+        model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device, weights_only=True))
         
-        # Nạp lại tạ model, trạng thái optimizer và mốc Epoch đang chạy dở
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_val_f1 = checkpoint.get('best_val_f1', 0.0)
+        # Tự động bóp phanh
+        active_lr = 1e-5 
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = active_lr
+        print(f"-> Đã hạ Learning Rate xuống {active_lr} để gọt giũa an toàn.")
         
-        print(f"-> Khôi phục thành công! Sẽ chạy tiếp từ Epoch {start_epoch + 1} với đầy đủ trí nhớ Gradient.")
     else:
-        print("\nKhông phát hiện sự cố cũ. Bắt đầu huấn luyện từ Epoch 1.")
+        print("\n[TRAIN MỚI] Không tìm thấy dữ liệu cũ. Bắt đầu train từ tờ giấy trắng...")
+    # ==========================================
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
     print("\nBẮT ĐẦU HUẤN LUYỆN V4 PRO...")
     for epoch in range(start_epoch, config.epochs):
@@ -109,9 +126,7 @@ def main():
             optimizer.zero_grad()
             outputs = model(images)
             
-            loss_ce = ce_loss_fn(outputs, masks)
-            loss_dice = dice_loss_fn(outputs, masks)
-            loss = loss_ce + loss_dice 
+            loss = ce_loss_fn(outputs, masks) + dice_loss_fn(outputs, masks)
             
             loss.backward()
             optimizer.step()
@@ -140,9 +155,7 @@ def main():
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
                 val_outputs = model(val_images)
                 
-                v_loss_ce = ce_loss_fn(val_outputs, val_masks)
-                v_loss_dice = dice_loss_fn(val_outputs, val_masks)
-                val_loss = v_loss_ce + v_loss_dice
+                val_loss = ce_loss_fn(val_outputs, val_masks) + dice_loss_fn(val_outputs, val_masks)
                 running_val_loss += val_loss.item()
 
                 preds = torch.argmax(val_outputs, dim=1)
@@ -156,17 +169,27 @@ def main():
 
         scheduler.step(avg_val_loss)
 
+        # --- UPDATE: PRINT FULL METRICS ---
         print(f"\n[Epoch {epoch+1}] Báo cáo:")
-        print(f"   Train | Loss: {avg_train_loss:.4f} | F1: {train_f1:.4f}")
-        print(f"   Val   | Loss: {avg_val_loss:.4f} | F1: {val_f1:.4f}\n")
+        print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
+        print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
 
         wandb.log({
-            "epoch": epoch + 1, "learning_rate": current_lr,
-            "Loss/Train": avg_train_loss, "Loss/Val": avg_val_loss,
-            "F1_Score/Train": train_f1, "F1_Score/Val": val_f1
+            "epoch": epoch + 1, 
+            "learning_rate": current_lr,
+            "Loss/Train": avg_train_loss, 
+            "Loss/Val": avg_val_loss,
+            "Accuracy/Train": train_acc,
+            "Accuracy/Val": val_acc,
+            "Precision/Train": train_prec,
+            "Precision/Val": val_prec,
+            "Recall/Train": train_recall,
+            "Recall/Val": val_recall,
+            "F1_Score/Train": train_f1, 
+            "F1_Score/Val": val_f1
         })
 
-        # HÀNH ĐỘNG 1: CỨ CUỐI ĐÊM LÀ GHI NHẬT KÝ (Lưu trạng thái Last để chống sập)
+        # GHI NHẬT KÝ CHỐNG SẬP
         checkpoint_last = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -175,14 +198,14 @@ def main():
         }
         torch.save(checkpoint_last, LAST_CHECKPOINT_PATH)
 
-        # HÀNH ĐỘNG 2: LƯU KỶ LỤC HOÀNG KIM (Best Model giữ nguyên chỉ lưu weights để đem đi Inference)
+        # LƯU KỶ LỤC HOÀNG KIM
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), BEST_MODEL_PATH)
             print(f"Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
             wandb.save(BEST_MODEL_PATH)
 
-    # Train xong xuôi an toàn thì xóa file Nhật ký chống sập đi
+    # Train xong an toàn thì xóa file Nhật ký chống sập
     if os.path.exists(LAST_CHECKPOINT_PATH):
         os.remove(LAST_CHECKPOINT_PATH)
 
