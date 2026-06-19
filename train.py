@@ -4,8 +4,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+import os
+import cv2
 
-# BỘ VŨ KHÍ MỚI: ALBUMENTATIONS
+# BỘ VŨ KHÍ AUGMENTATION HẠNG NẶNG
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -13,7 +15,7 @@ from src.dataset import EmbroideryDataset
 from src.model import UNet
 
 # ==========================================
-# 1. BỘ VŨ KHÍ MỚI CHỐNG TRÀN VIỀN: DICE LOSS
+# 1. BỘ VŨ KHÍ CHỐNG TRÀN VIỀN: DICE LOSS
 # ==========================================
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):
@@ -21,13 +23,18 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, inputs, targets):
+        # Lấy xác suất dự đoán của class 1 (Vùng Fill)
         probs = torch.softmax(inputs, dim=1)[:, 1] 
         targets_float = targets.float()
         
+        # Tính độ giao nhau (Intersection) và phần hợp (Union)
         intersection = (probs * targets_float).sum(dim=(1,2))
         union = probs.sum(dim=(1,2)) + targets_float.sum(dim=(1,2))
         
+        # Dice Score: 1 là hoàn hảo, 0 là trật lất
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        
+        # Vì là hàm Loss (cần giảm về 0), ta lấy 1 trừ đi Dice Score
         return 1.0 - dice.mean()
 
 # ==========================================
@@ -45,9 +52,10 @@ def calculate_metrics(tp, fp, fn, tn):
 # CHƯƠNG TRÌNH CHÍNH
 # ==========================================
 def main():
+    # Khởi tạo Weights & Biases để theo dõi
     wandb.init(
         project="embroidery-segmentation", 
-        name="v3-dice-loss-no-test-set",         
+        name="v4-pro-augmentation-onthefly",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U-Net",
@@ -55,7 +63,8 @@ def main():
             "epochs": 50,
             "batch_size": 4,
             "image_size": 512,
-            "fill_weight": 2.0  
+            "fill_weight": 2.0,
+            "crops_per_image": 20 # 1 ảnh gốc sẽ được cắt 20 lần ngẫu nhiên trong 1 Epoch
         }
     )
     config = wandb.config 
@@ -64,28 +73,70 @@ def main():
     print(f"Đang sử dụng thiết bị tính toán: {device}")
 
     # ==========================================
-    # KHAI BÁO DATA AUGMENTATION (TĂNG CƯỜNG DỮ LIỆU)
+    # 2. KHAI BÁO DATA AUGMENTATION (BẢN PRO)
     # ==========================================
     train_transform = A.Compose([
+        # Cắt thông minh: Ưu tiên nhắm vào chỗ có nét vẽ
+        A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size), 
+        
+        # Lật ảnh cơ bản
         A.HorizontalFlip(p=0.5), 
         A.VerticalFlip(p=0.5),   
-        A.RandomRotate90(p=0.5), 
+        
+        # Xoay tự do & Dịch chuyển (Đắp viền đen)
+        A.ShiftScaleRotate(
+            shift_limit=0.0625, scale_limit=0.15, rotate_limit=180, 
+            interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_CONSTANT, 
+            value=0, mask_value=0, p=0.7
+        ),
+
+        # Biến dạng đàn hồi (Elastic) - Uốn cong nét vẽ
+        A.ElasticTransform(
+            alpha=1, sigma=50, alpha_affine=50, 
+            border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=0.3
+        ),
+
+        # Giả lập đứt nét / Mất chi tiết (Khoét lỗ đen)
+        A.CoarseDropout(
+            max_holes=8, max_height=32, max_width=32, 
+            min_holes=2, min_height=8, min_width=8,
+            fill_value=0, mask_fill_value=0, p=0.3
+        ),
+
         ToTensorV2()             
     ])
 
     val_transform = A.Compose([
+        # Validation cũng cắt vào chỗ có nét vẽ để đánh giá F1 cho chuẩn
+        A.CropNonEmptyMaskIfExists(width=config.image_size, height=config.image_size),
         ToTensorV2()
     ])
 
-    # CHỈ CÒN TRAIN VÀ VAL
-    train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform)
-    val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_transform)
+    # ==========================================
+    # 3. NẠP DỮ LIỆU (ON-THE-FLY)
+    # ==========================================
+    train_dataset = EmbroideryDataset(
+        image_dir="data/train/images", 
+        mask_dir="data/train/masks", 
+        transform=train_transform,
+        resize_factor=0.5,
+        crops_per_image=config.crops_per_image
+    )
+    
+    val_dataset = EmbroideryDataset(
+        image_dir="data/val/images", 
+        mask_dir="data/val/masks", 
+        transform=val_transform,
+        resize_factor=0.5,
+        crops_per_image=max(1, config.crops_per_image // 2)
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
 
     model = UNet(in_channels=1, out_channels=2).to(device)
     
+    # Kết hợp CE Loss và Dice Loss
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     dice_loss_fn = DiceLoss()
@@ -95,7 +146,7 @@ def main():
 
     best_val_f1 = 0.0
 
-    print("\nBẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN V3 (CHỈ TRAIN VÀ VAL)...")
+    print("\nBẮT ĐẦU HUẤN LUYỆN V4 PRO (ON-THE-FLY & ADVANCED AUGMENTATION)...")
     for epoch in range(config.epochs):
         
         # ------------------------------------------
@@ -113,6 +164,7 @@ def main():
             optimizer.zero_grad()
             outputs = model(images)
             
+            # Tính tổng 2 Loss
             loss_ce = ce_loss_fn(outputs, masks)
             loss_dice = dice_loss_fn(outputs, masks)
             loss = loss_ce + loss_dice 
@@ -161,6 +213,7 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         val_acc, val_prec, val_recall, val_f1 = calculate_metrics(val_tp, val_fp, val_fn, val_tn)
 
+        # Giảm Learning Rate nếu Loss đi ngang
         old_lr = optimizer.param_groups[0]['lr']
         scheduler.step(avg_val_loss)
         new_lr = optimizer.param_groups[0]['lr']
@@ -189,6 +242,7 @@ def main():
             "F1_Score/Val": val_f1
         })
 
+        # Lưu Checkpoint tốt nhất
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), "unet_binary_best.pth")
