@@ -15,16 +15,16 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.ba
 PATCH_SIZE = 512
 MODEL_PATH = "unet_binary_best.pth" 
 
-# --- 2 CON ỐC ĐÃ ĐƯỢC VẶN LẠI CHO MODEL V3 ---
+# --- 2 CON ỐC ĐÃ ĐƯỢC VẶN LẠI CHO MODEL V4 PRO ---
 RESIZE_FACTOR = 0.5            
-CONFIDENCE_THRESHOLD = 0.50    # Sửa thành 0.5 vì model V3 (Dice Loss) đã quá chuẩn, không cần siết gắt nữa
+CONFIDENCE_THRESHOLD = 0.50    # Sửa thành 0.5 vì model V4 đã quá chuẩn, không cần siết gắt nữa
 
 # Khởi tạo và nạp tệp trọng số (bộ não AI)
 model = UNet(in_channels=1, out_channels=2).to(DEVICE)
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
     model.eval()
-    print("Đã nạp thành công bộ não AI V3!")
+    print("Đã nạp thành công bộ não AI V4 PRO!")
 else:
     print("Không tìm thấy file model. Bạn đã train xong chưa?")
     exit()
