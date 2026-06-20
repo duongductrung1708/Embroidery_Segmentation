@@ -122,7 +122,7 @@ def predict_full_image(img_path, save_output=True):
     plt.axis('off')
 
     plt.subplot(1, 2, 2)
-    plt.title("Mask từ AI V3 (Đã vá lỗ)")
+    plt.title("Mask từ AI V4 PRO)")
     overlay_clean = display_img.copy()
     overlay_clean[final_cleaned_mask == 1] = [0, 255, 0] # Màu Xanh Lá
     plt.imshow(overlay_clean)
