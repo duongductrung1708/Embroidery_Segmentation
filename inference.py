@@ -9,15 +9,13 @@ import os
 from src.model import UNet 
 
 # ==========================================
-# 1. CẤU HÌNH
+# 1. CẤU HÌNH V4 PRO
 # ==========================================
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 PATCH_SIZE = 512
 MODEL_PATH = "unet_binary_best.pth" 
 
-# --- 2 CON ỐC ĐÃ ĐƯỢC VẶN LẠI CHO MODEL V4 PRO ---
 RESIZE_FACTOR = 0.5            
-CONFIDENCE_THRESHOLD = 0.50    # Sửa thành 0.5 vì model V4 đã quá chuẩn, không cần siết gắt nữa
 
 # Khởi tạo và nạp tệp trọng số (bộ não AI)
 model = UNet(in_channels=1, out_channels=2).to(DEVICE)
@@ -39,7 +37,6 @@ def predict_full_image(img_path, save_output=True):
     orig_w, orig_h = rgba_img.size
     alpha_channel_orig = np.array(rgba_img.getchannel("A"), dtype=np.float32)
 
-    # Thu nhỏ ảnh lại giống hệt lúc train
     new_w = int(orig_w * RESIZE_FACTOR)
     new_h = int(orig_h * RESIZE_FACTOR)
     alpha_channel_resized = cv2.resize(alpha_channel_orig, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -51,62 +48,64 @@ def predict_full_image(img_path, save_output=True):
     pad_w = (PATCH_SIZE - new_w % PATCH_SIZE) % PATCH_SIZE
     
     padded_alpha = np.pad(alpha_channel_resized, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
-    padded_pred = np.zeros_like(padded_alpha, dtype=np.uint8)
+    
+    # [NÂNG CẤP V4 PRO]: Lưu xác suất Float thay vì Binary
+    padded_prob_canvas = np.zeros_like(padded_alpha, dtype=np.float32)
 
     # ==========================================
-    # 4. QUÉT SLIDING WINDOW VÀ SIẾT NGƯỠNG
+    # 4. QUÉT SLIDING WINDOW VÀ TRÍCH XUẤT XÁC SUẤT
     # ==========================================
-    print(f"AI đang nhận diện (Ngưỡng tự tin > {int(CONFIDENCE_THRESHOLD * 100)}%)...")
+    print(f"AI đang phân tích luồng xác suất trên các đường cong...")
     with torch.no_grad():
         for y in range(0, padded_alpha.shape[0] - PATCH_SIZE + 1, PATCH_SIZE):
             for x in range(0, padded_alpha.shape[1] - PATCH_SIZE + 1, PATCH_SIZE):
                 patch = padded_alpha[y:y+PATCH_SIZE, x:x+PATCH_SIZE]
                 
-                # Chỗ nào trong suốt toàn tập thì bỏ qua cho nhanh
                 if np.max(patch) == 0: continue
                 
-                # Ép kiểu cho PyTorch
                 input_tensor = torch.tensor(patch).unsqueeze(0).unsqueeze(0) / 255.0
                 input_tensor = input_tensor.to(DEVICE)
                 
-                # AI dự đoán
                 output = model(input_tensor)
                 
                 probs = torch.softmax(output, dim=1) 
-                fill_probs = probs[0, 1, :, :] 
+                # Lấy xác suất dạng float (0.0 -> 1.0)
+                fill_probs = probs[0, 1, :, :].cpu().numpy()
                 
-                # Tô trắng dựa trên ngưỡng 0.5
-                pred_patch = (fill_probs > CONFIDENCE_THRESHOLD).cpu().numpy().astype(np.uint8)
-                
-                # Dán kết quả vào canvas
-                padded_pred[y:y+PATCH_SIZE, x:x+PATCH_SIZE] = pred_patch
+                padded_prob_canvas[y:y+PATCH_SIZE, x:x+PATCH_SIZE] = fill_probs
 
-    # Cắt bỏ phần viền thừa đã đệm lúc nãy
-    pred_resized_mask = padded_pred[:new_h, :new_w]
+    # Cắt bỏ phần viền đệm thừa
+    prob_resized = padded_prob_canvas[:new_h, :new_w]
 
-    # Phóng to Mask trả lại kích thước gốc (Dùng INTER_NEAREST để viền cứng)
-    raw_final_mask = cv2.resize(pred_resized_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+    # [NÂNG CẤP V4 PRO]: Phóng to xác suất bằng INTER_LINEAR để giữ đường cong mượt mà
+    raw_final_prob = cv2.resize(prob_resized, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
     # ==========================================
-    # 5. THỢ MỘC OPENCV (Chỉ vá lỗ, KHÔNG gọt viền nữa)
+    # 5. BỘ LỌC ĐƯỜNG CONG TỰ NHIÊN (ADVANCED POST-PROCESSING)
     # ==========================================
-    print("OpenCV đang vá các lỗ thủng li ti (nếu có)...")
-    mask_255 = (raw_final_mask * 255).astype(np.uint8)
-    
-    kernel = np.ones((3, 3), np.uint8) 
-    
-    # Đóng lỗ (Closing): Lấp các khe nứt li ti bên trong
-    cleaned_mask = cv2.morphologyEx(mask_255, cv2.MORPH_CLOSE, kernel, iterations=1)
-    
-    # --- ĐÃ CẤT GIẤY NHÁM ĐI ĐỂ TRÁNH MASK BỊ TEO TÓP ---
-    # cleaned_mask = cv2.erode(cleaned_mask, kernel, iterations=1)
-    
+    print("Đang áp dụng bộ lọc hình học làm mịn đường cong...")
+
+    # Bước 1: Làm mịn luồng xác suất bằng Gaussian Blur (Triệt tiêu lởm chởm)
+    smoothed_prob = cv2.GaussianBlur(raw_final_prob, (5, 5), 0)
+
+    # Bước 2: Siết ngưỡng nghiêm ngặt để diệt viền thừa
+    NEW_CONFIDENCE_THRESHOLD = 0.65
+    binary_mask = (smoothed_prob > NEW_CONFIDENCE_THRESHOLD).astype(np.uint8) * 255
+
+    # Bước 3: Tổ hợp Morphology đóng lỗ thủng bên trong đường cong
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+
+    # Bước 4: Mài nhẹ viền (Giấy nhám) nếu vẫn còn hơi tràn
+    kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    cleaned_mask = cv2.erode(cleaned_mask, kernel_erode, iterations=1)
+
     final_cleaned_mask = (cleaned_mask > 127).astype(np.uint8)
 
     if save_output:
         out_name = "AI_Mask_Cleaned.png"
         cv2.imwrite(out_name, cleaned_mask)
-        print(f"Đã lưu Mask hoàn hảo ra file: {out_name}")
+        print(f"Đã lưu Mask hoàn hảo đường cong ra file: {out_name}")
 
     # ==========================================
     # 6. HIỂN THỊ KẾT QUẢ
@@ -122,7 +121,7 @@ def predict_full_image(img_path, save_output=True):
     plt.axis('off')
 
     plt.subplot(1, 2, 2)
-    plt.title("Mask từ AI V4 PRO)")
+    plt.title(f"Mask từ AI V4 PRO (Threshold: {NEW_CONFIDENCE_THRESHOLD})")
     overlay_clean = display_img.copy()
     overlay_clean[final_cleaned_mask == 1] = [0, 255, 0] # Màu Xanh Lá
     plt.imshow(overlay_clean)
@@ -132,4 +131,4 @@ def predict_full_image(img_path, save_output=True):
     plt.show()
 
 # CHẠY THỬ VỚI ẢNH CỦA BẠN
-predict_full_image("./data/test/test1.png")
+predict_full_image("./data/test/test3.png")
