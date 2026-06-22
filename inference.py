@@ -121,7 +121,7 @@ def predict_full_image(img_path, save_output=True):
     plt.axis('off')
 
     plt.subplot(1, 2, 2)
-    plt.title(f"Mask từ AI V4 PRO (Threshold: {NEW_CONFIDENCE_THRESHOLD})")
+    plt.title(f"Mask từ AI (Threshold: {NEW_CONFIDENCE_THRESHOLD})")
     overlay_clean = display_img.copy()
     overlay_clean[final_cleaned_mask == 1] = [0, 255, 0] # Màu Xanh Lá
     plt.imshow(overlay_clean)
@@ -131,4 +131,4 @@ def predict_full_image(img_path, save_output=True):
     plt.show()
 
 # CHẠY THỬ VỚI ẢNH CỦA BẠN
-predict_full_image("./data/test/test3.png")
+predict_full_image("./data/test/test10.png")
