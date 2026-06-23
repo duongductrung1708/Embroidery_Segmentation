@@ -6,6 +6,7 @@ from tqdm import tqdm
 import wandb
 import os
 import cv2
+import numpy as np
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -75,7 +76,7 @@ def main():
     config = wandb.config 
 
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
-    print(f"Đang sử dụng thiết bị tính toán: {device}")
+    print(f"Dang su dung thiet bi tinh toan: {device}")
 
     # ==========================================
     # 3. CHUẨN BỊ MÔ HÌNH VÀ MÔI TRƯỜNG
@@ -100,37 +101,43 @@ def main():
     # Cơ chế Chống Sập & Fine-Tune
     if os.path.exists(LAST_CHECKPOINT_PATH):
         try:
-            print(f"\n[PHỤC HỒI] Phát hiện sự cố sập nguồn. Đang khôi phục từ '{LAST_CHECKPOINT_PATH}'...")
+            print(f"\n[PHUC HOI] Phat hien su co sap nguon. Dang khoi phuc tu '{LAST_CHECKPOINT_PATH}'...")
             checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
             
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_val_f1 = checkpoint.get('best_val_f1', 0.0)
-            print(f"-> Thành công! Sẽ chạy tiếp từ Epoch {start_epoch + 1}.")
+            print(f"-> Thanh cong! Se chay tiep tu Epoch {start_epoch + 1}.")
         except KeyError:
-            print(f"\nLỖI: File '{LAST_CHECKPOINT_PATH}' bị sai định dạng nhật ký!")
-            print("-> Hãy xóa file 'unet_binary_last.pth' đi và chạy lại.")
+            print(f"\nLOI: File '{LAST_CHECKPOINT_PATH}' bi sai dinh dang nhat ky!")
+            print("-> Hay xoa file 'unet_binary_last.pth' di va chay lai.")
             exit()
             
     elif os.path.exists(BEST_MODEL_PATH):
-        print(f"\n[FINE-TUNE] Phát hiện tạ cũ '{BEST_MODEL_PATH}'. Nạp trí nhớ để học thêm ảnh mới...")
+        print(f"\n[FINE-TUNE] Phat hien ta cu '{BEST_MODEL_PATH}'. Nap tri nho de hoc them anh moi...")
         model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device, weights_only=True))
         
         active_lr = 1e-5 
         for param_group in optimizer.param_groups:
             param_group['lr'] = active_lr
-        print(f"-> Đã hạ Learning Rate xuống {active_lr} để gọt giũa an toàn.")
+        print(f"-> Da ha Learning Rate xuong {active_lr} de got giua an toan.")
         
     else:
-        print("\n[TRAIN MỚI] Không tìm thấy dữ liệu cũ. Bắt đầu train từ tờ giấy trắng...")
+        print("\n[TRAIN MOI] Khong tim thay du lieu cu. Bat dau train tu to giay trang...")
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
     # ==========================================
+    # CƠ CHẾ DỪNG SỚM (EARLY STOPPING)
+    # ==========================================
+    EARLY_STOPPING_PATIENCE = 7
+    epochs_no_improve = 0
+
+    # ==========================================
     # 4. VÒNG LẶP HUẤN LUYỆN CHÍNH
     # ==========================================
-    print("\nBẮT ĐẦU HUẤN LUYỆN V4 PRO...")
+    print("\nBAT DAU HUAN LUYEN V4 PRO...")
     for epoch in range(start_epoch, config.epochs):
         
         # --- PHA TRAIN ---
@@ -193,25 +200,26 @@ def main():
                     for i in range(num_images):
                         img_np = val_images[i].cpu().numpy().squeeze() 
                         
+                        # Fix lỗi torch.uint8 thành np.uint8
                         if img_np.max() <= 1.0:
-                            img_np = (img_np * 255).astype(torch.uint8).numpy()
+                            img_np = (img_np * 255).astype(np.uint8)
                         else:
-                            img_np = img_np.astype(torch.uint8).numpy()
+                            img_np = img_np.astype(np.uint8)
                             
-                        true_mask_np = val_masks[i].cpu().numpy().astype(torch.uint8).numpy()
-                        pred_mask_np = preds[i].cpu().numpy().astype(torch.uint8).numpy()
+                        true_mask_np = val_masks[i].cpu().numpy().astype(np.uint8)
+                        pred_mask_np = preds[i].cpu().numpy().astype(np.uint8)
                         
                         wandb_img = wandb.Image(
                             img_np, 
-                            caption=f"Mẫu Validation số {i+1}",
+                            caption=f"Mau Validation so {i+1}",
                             masks={
                                 "ground_truth": {
                                     "mask_data": true_mask_np,
-                                    "class_labels": {0: "Nền", 1: "Fill chuẩn"}
+                                    "class_labels": {0: "Nen", 1: "Fill chuan"}
                                 },
                                 "predictions": {
                                     "mask_data": pred_mask_np,
-                                    "class_labels": {0: "Nền", 1: "AI Dự đoán"}
+                                    "class_labels": {0: "Nen", 1: "AI Du doan"}
                                 }
                             }
                         )
@@ -223,7 +231,7 @@ def main():
         scheduler.step(avg_val_loss)
 
         # --- BÁO CÁO & GHI LOG W&B ---
-        print(f"\n[Epoch {epoch+1}] Báo cáo:")
+        print(f"\n[Epoch {epoch+1}] Bao cao:")
         print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
         print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
 
@@ -252,16 +260,28 @@ def main():
         }
         torch.save(checkpoint_last, LAST_CHECKPOINT_PATH)
 
+        # --- KIỂM TRA HỘI TỤ (EARLY STOPPING) ---
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            print(f"Đã lưu kỷ lục mới (Best Val F1: {best_val_f1:.4f})")
+            print(f"Da luu ky luc moi (Best Val F1: {best_val_f1:.4f})")
             wandb.save(BEST_MODEL_PATH)
+            
+            # Reset bộ đếm kiên nhẫn
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            print(f"Validation F1 khong tang. Canh bao: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
+
+        # Kéo phanh khẩn cấp nếu cạn kiệt kiên nhẫn
+        if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
+            print(f"\nMO HINH DA HOI TU TAI EPOCH {epoch + 1}! Da kich hoat Dung Som de tiet kiem thoi gian.")
+            break
 
     if os.path.exists(LAST_CHECKPOINT_PATH):
         os.remove(LAST_CHECKPOINT_PATH)
 
-    print("\nHOÀN THÀNH HUẤN LUYỆN!")
+    print("\nHOAN THANH HUAN LUYEN!")
     wandb.finish() 
 
 if __name__ == "__main__":

@@ -5,3 +5,7 @@ numpy
 pyembroidery
 matplotlib
 tqdm
+wandb
+albumentations
+pillow
+scikit-learn
