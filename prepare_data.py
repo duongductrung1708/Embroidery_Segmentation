@@ -5,8 +5,8 @@ import os
 # ==========================================
 # CẤU HÌNH GỐC
 # ==========================================
-FILE_NAME = "80.png" # Ảnh gốc vớ vẩn trên mạng (PNG rỗng, JPG nền trắng...)
-OUTPUT_NAME = "80.png" # SẢN PHẨM HOÀN HẢO ĐỂ TRAIN V5 (PHẢI .PNG)
+FILE_NAME = "83.png" # Ảnh gốc vớ vẩn trên mạng (PNG rỗng, JPG nền trắng...)
+OUTPUT_NAME = "83.png" # SẢN PHẨM HOÀN HẢO ĐỂ TRAIN V5 (PHẢI .PNG)
 TARGET_W = 4200
 TARGET_H = 2340
 
