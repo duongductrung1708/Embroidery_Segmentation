@@ -3,6 +3,7 @@ import torch.nn as nn
 import random
 import numpy as np
 import os
+import cv2
 
 # ==========================================
 # 1. CỐ ĐỊNH MÔI TRƯỜNG (REPRODUCIBILITY)
@@ -31,10 +32,10 @@ def calculate_metrics(tp, fp, fn, tn):
     return accuracy, precision, recall, f1
 
 # ==========================================
-# 3. HÀM TÍNH LOSS KÉP (DICE LOSS)
+# 3. CÁC HÀM LOSS NÂNG CAO (TRỊ TRÀN VIỀN & MŨI MẮT)
 # ==========================================
 class DiceLoss(nn.Module):
-    """Trừng phạt AI khi vẽ sai hình dáng của mảng thêu"""
+    """Trừng phạt AI khi vẽ sai hình dáng tổng thể của mảng thêu"""
     def __init__(self, smooth=1e-5):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
@@ -50,14 +51,30 @@ class DiceLoss(nn.Module):
         return 1.0 - dice.mean()
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0):
+    """Trị lỗi Model bỏ qua các chi tiết khó (như biên giới, vùng nhỏ)"""
+    def __init__(self, weight=None, gamma=2.0, label_smoothing=0.1):
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
+        self.weight = weight
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
 
     def forward(self, inputs, targets):
         # inputs: [Batch, Class, H, W], targets: [Batch, H, W]
-        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
+        ce_loss = nn.functional.cross_entropy(
+            inputs, targets, weight=self.weight, 
+            reduction='none', label_smoothing=self.label_smoothing
+        )
         pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt)**self.gamma * ce_loss
+        focal_loss = ((1 - pt) ** self.gamma * ce_loss)
         return focal_loss.mean()
+
+def get_boundary_mask(masks, device):
+    """Trích xuất đường biên bằng thuật toán Canny để ép Model học ranh giới"""
+    masks_np = masks.cpu().numpy().astype(np.uint8)
+    boundaries = np.zeros_like(masks_np, dtype=np.float32)
+    for i in range(masks_np.shape[0]):
+        # Chuyển mask (0, 1) sang (0, 255) cho hàm cv2.Canny
+        mask_255 = (masks_np[i] * 255).astype(np.uint8)
+        edges = cv2.Canny(mask_255, 100, 200)
+        boundaries[i] = (edges > 0).astype(np.float32)
+    return torch.from_numpy(boundaries).to(device)
