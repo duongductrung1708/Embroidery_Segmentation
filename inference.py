@@ -11,7 +11,7 @@ import math
 from src.model import UNet 
 
 # ==========================================
-# 1. CẤU HÌNH V4 PRO
+# 1. CẤU HÌNH V5
 # ==========================================
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 PATCH_SIZE = 512
@@ -29,7 +29,7 @@ model = UNet(in_channels=1, out_channels=2).to(DEVICE)
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
     model.eval()
-    print("Da nap thanh cong bo nao AI V4 PRO!")
+    print("Da nap thanh cong bo nao AI V5!")
 else:
     print("Khong tim thay file model. Ban da train xong chua?")
     exit()

@@ -78,3 +78,4 @@ def get_boundary_mask(masks, device):
         edges = cv2.Canny(mask_255, 100, 200)
         boundaries[i] = (edges > 0).astype(np.float32)
     return torch.from_numpy(boundaries).to(device)
+
