@@ -48,3 +48,16 @@ class DiceLoss(nn.Module):
         
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
         return 1.0 - dice.mean()
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        # inputs: [Batch, Class, H, W], targets: [Batch, H, W]
+        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt)**self.gamma * ce_loss
+        return focal_loss.mean()

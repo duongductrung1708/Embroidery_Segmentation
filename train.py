@@ -63,7 +63,7 @@ def main():
             "epochs": 50,
             "batch_size": BATCH_SIZE,
             "image_size": TEMP_IMAGE_SIZE,
-            "fill_weight": 2.0,
+            "fill_weight": 2.5,
             "crops_per_image": TEMP_CROPS,
             
             # Thông số thực tế đếm được từ thư mục
