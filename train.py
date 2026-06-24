@@ -131,7 +131,7 @@ def main():
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
-    EARLY_STOPPING_PATIENCE = 7
+    EARLY_STOPPING_PATIENCE = 12
     epochs_no_improve = 0
 
     # ==========================================
