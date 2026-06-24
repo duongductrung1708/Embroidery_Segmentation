@@ -20,10 +20,14 @@ from src.utils import DiceLoss, FocalLoss, get_boundary_mask, calculate_metrics,
 def main():
     seed_everything(42)
 
+    # ==========================================
+    # 1. CẤU HÌNH HỆ THỐNG
+    # ==========================================
     TEMP_IMAGE_SIZE = 512
     TEMP_CROPS = 20
     BATCH_SIZE = 4
 
+    # --- TẬP TRAIN: Cắt nhỏ & Data Augmentation Hạng nặng ---
     train_transform = A.Compose([
         A.OneOf([
             A.CropNonEmptyMaskIfExists(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE, p=0.8),
@@ -39,17 +43,35 @@ def main():
         ToTensorV2()             
     ])
 
+    # --- TẬP VAL: Cắt nhỏ để tính Loss cho nhẹ VRAM ---
     val_transform = A.Compose([
         A.CropNonEmptyMaskIfExists(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE),
         ToTensorV2()
     ])
 
+    # --- TẬP TRACKING: Kính lúp Góc Rộng (Tuyệt đối không cắt) ---
+    tracking_transform = A.Compose([
+        A.Resize(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE),
+        ToTensorV2()
+    ])
+
+    # ==========================================
+    # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
+    # ==========================================
     train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
     val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=max(1, TEMP_CROPS // 2))
+    tracking_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=tracking_transform, resize_factor=1.0, crops_per_image=1)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
+    tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     num_train_images = len(train_dataset) // TEMP_CROPS 
     num_val_images = len(val_dataset) // max(1, TEMP_CROPS // 2)
 
+    # ==========================================
+    # 3. KHỞI TẠO WANDB & THIẾT BỊ
+    # ==========================================
     wandb.init(
         project="embroidery-segmentation", 
         name="v6-u2net-deep-supervision",         
@@ -69,18 +91,15 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"Dang su dung thiet bi tinh toan: {device}")
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, persistent_workers=True) 
-
-    # ==========================================
-    # LẤY MẪU CỐ ĐỊNH ĐỂ THEO DÕI QUA CÁC EPOCH
-    # ==========================================
-    print("Dang trich xuat tap mau co dinh de log len WandB...")
-    fixed_val_batch = next(iter(val_loader))
+    # --- Trích xuất 1 Lô Ảnh Toàn Cảnh (Góc rộng) cố định ---
+    print("Dang trich xuat tap mau Toan Canh de log len WandB...")
+    fixed_val_batch = next(iter(tracking_loader))
     fixed_val_images = fixed_val_batch[0].to(device)
     fixed_val_masks = fixed_val_batch[1].to(device)
 
-    # Khởi tạo U2NET
+    # ==========================================
+    # 4. CHUẨN BỊ BỘ NÃO U-2-NET & LOSS FUNCTION
+    # ==========================================
     model = U2NET(in_ch=1, out_ch=2).to(device)
     class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
     
@@ -113,10 +132,12 @@ def main():
         print("\n[TRAIN MOI] Bat dau huan luyen U2-Net...")
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
-
     EARLY_STOPPING_PATIENCE = 12
     epochs_no_improve = 0
 
+    # ==========================================
+    # 5. VÒNG LẶP HUẤN LUYỆN
+    # ==========================================
     print("\nBAT DAU HUAN LUYEN V6 (U2-NET DEEP SUPERVISION)...")
     for epoch in range(start_epoch, config.epochs):
         
@@ -129,14 +150,13 @@ def main():
 
         for images, masks in loop:
             images, masks = images.to(device), masks.to(device)
-            
             optimizer.zero_grad()
             
-            # U2NET trả về 7 outputs
-            outputs = model(images) 
+            outputs = model(images)  # U2-Net trả về 7 bản đồ
             boundary_targets = get_boundary_mask(masks, device)
             
             loss = 0.0
+            # Deep Supervision: Cộng dồn Loss của cả 7 bản đồ
             for d in outputs:
                 seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
                 boundary_loss = bce_boundary_fn(d[:, 1, :, :], boundary_targets)
@@ -150,7 +170,7 @@ def main():
             loop.set_postfix(loss=loss.item(), lr=current_lr)
             
             with torch.no_grad():
-                preds = torch.argmax(outputs[0], dim=1)
+                preds = torch.argmax(outputs[0], dim=1) # Chỉ đánh giá độ chính xác trên d0
                 train_tp += ((preds == 1) & (masks == 1)).sum().item() 
                 train_fp += ((preds == 1) & (masks == 0)).sum().item() 
                 train_fn += ((preds == 0) & (masks == 1)).sum().item() 
@@ -159,13 +179,13 @@ def main():
         avg_train_loss = running_train_loss / len(train_loader)
         train_acc, train_prec, train_recall, train_f1 = calculate_metrics(train_tp, train_fp, train_fn, train_tn)
 
-        # --- PHA VALIDATION ---
+        # --- PHA VALIDATION (CẮT NHỎ TÍNH LOSS) ---
         model.eval()
         running_val_loss = 0.0
         val_tp = val_fp = val_fn = val_tn = 0 
         
         with torch.no_grad():
-            for batch_idx, (val_images, val_masks) in enumerate(val_loader):
+            for val_images, val_masks in val_loader:
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
                 val_outputs = model(val_images)
                 
@@ -186,9 +206,7 @@ def main():
                 val_fn += ((preds == 0) & (val_masks == 1)).sum().item()
                 val_tn += ((preds == 0) & (val_masks == 0)).sum().item()
 
-            # ==========================================
-            # DỰ ĐOÁN VÀ LOG TẬP MẪU CỐ ĐỊNH LÊN W&B
-            # ==========================================
+            # --- DỰ ĐOÁN ẢNH TOÀN CẢNH (GÓC RỘNG) CHO WANDB ---
             fixed_outputs = model(fixed_val_images)
             fixed_preds = torch.argmax(fixed_outputs[0], dim=1)
 
@@ -207,7 +225,7 @@ def main():
                 
                 wandb_img = wandb.Image(
                     img_np, 
-                    caption=f"Mau Co Dinh so {i+1}",
+                    caption=f"Toan Canh #{i+1} (Epoch {epoch+1})",
                     masks={
                         "ground_truth": {
                             "mask_data": true_mask_np,
@@ -226,7 +244,7 @@ def main():
 
         scheduler.step(avg_val_loss)
 
-        print(f"\n[Epoch {epoch+1}] Bao cao U2NET:")
+        print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET:")
         print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
         print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
 
@@ -271,7 +289,7 @@ def main():
     if os.path.exists(LAST_CHECKPOINT_PATH):
         os.remove(LAST_CHECKPOINT_PATH)
 
-    print("\nHOAN THANH HUAN LUYEN!")
+    print("\nHOAN THANH HUAN LUYEN V6!")
     wandb.finish() 
 
 if __name__ == "__main__":
