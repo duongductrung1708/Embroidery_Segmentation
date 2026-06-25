@@ -10,3 +10,6 @@ albumentations
 pillow
 scikit-learn
 vtracer
+fal-client
+requests
+pillow

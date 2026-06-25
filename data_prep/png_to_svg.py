@@ -3,7 +3,50 @@ import glob
 import cv2
 import numpy as np
 import vtracer
+import fal_client
 from tqdm import tqdm
+
+def enhance_with_fal(img_path, original_alpha=None):
+    """
+    Sử dụng fal.ai NAFNet model để làm mượt và khử nhiễu ảnh.
+    Giữ lại alpha channel gốc nếu có.
+    """
+    try:
+        # Encode image as data URL
+        image_data_url = fal_client.encode_file(img_path)
+        
+        # Call NAFNet deblur model
+        result = fal_client.run(
+            "fal-ai/nafnet/deblur",
+            arguments={
+                "image_url": image_data_url
+            }
+        )
+        
+        # Download processed image
+        import requests
+        processed_url = result["image"]["url"]
+        response = requests.get(processed_url)
+        
+        # Convert to numpy array
+        import io
+        from PIL import Image
+        img_pil = Image.open(io.BytesIO(response.content))
+        img_array = np.array(img_pil)
+        
+        # Convert RGB to BGR for OpenCV
+        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # Nếu có alpha channel gốc, dán lại vào ảnh đã xử lý
+        if original_alpha is not None:
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                img_array = cv2.merge([img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2], original_alpha])
+        
+        return img_array
+    except Exception as e:
+        print(f"Lỗi khi xử lý với fal.ai: {e}")
+        return None
 
 def clean_rgba_image(img):
     """
@@ -18,12 +61,13 @@ def clean_rgba_image(img):
         # Làm mượt RGB channels bằng bilateral filter để giữ cạnh nhưng giảm nhiễu
         rgb_smooth = cv2.bilateralFilter(rgb, 9, 75, 75)
         
-        # Làm mượt alpha channel bằng Gaussian blur để giảm răng cưa
-        alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
+        # Làm SẮC LẸM alpha channel bằng Threshold thay vì Blur
+        # vtracer cần alpha binary (0 hoặc 255) để tránh tạo hàng ngàn vector path
+        _, alpha_binary = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
         
         # Khử nhiễu alpha channel bằng morphology
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        alpha_clean = cv2.morphologyEx(alpha, cv2.MORPH_OPEN, kernel)
+        alpha_clean = cv2.morphologyEx(alpha_binary, cv2.MORPH_OPEN, kernel)
         alpha_clean = cv2.morphologyEx(alpha_clean, cv2.MORPH_CLOSE, kernel)
         
         # Cập nhật alpha channel đã làm sạch và RGB đã làm mượt
@@ -72,6 +116,17 @@ def process_pipeline(input_dir, clean_dir, svg_dir):
         img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
         if img is None:
             continue
+        
+        # Trích xuất alpha channel gốc trước khi xử lý với fal.ai
+        original_alpha = None
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            original_alpha = img[:, :, 3].copy()
+        
+        # 1.1 Tăng chất lượng ảnh với fal.ai NAFNet
+        enhanced_img = enhance_with_fal(img_path, original_alpha)
+        if enhanced_img is not None:
+            img = enhanced_img
+            print(f"  Đã tăng chất lượng với fal.ai: {filename}")
         
         clean_img = clean_rgba_image(img)
         cv2.imwrite(clean_path, clean_img)
