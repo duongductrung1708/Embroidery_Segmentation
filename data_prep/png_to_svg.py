@@ -58,8 +58,8 @@ def clean_rgba_image(img):
         alpha = img[:, :, 3]
         rgb = img[:, :, :3]
         
-        # Làm mượt RGB channels bằng bilateral filter để giữ cạnh nhưng giảm nhiễu
-        rgb_smooth = cv2.bilateralFilter(rgb, 9, 75, 75)
+        # Làm mượt RGB channels bằng bilateral filter mạnh hơn để giảm nhọn nhô
+        rgb_smooth = cv2.bilateralFilter(rgb, 15, 100, 100)
         
         # Làm SẮC LẸM alpha channel bằng Threshold thay vì Blur
         # vtracer cần alpha binary (0 hoặc 255) để tránh tạo hàng ngàn vector path
@@ -79,8 +79,8 @@ def clean_rgba_image(img):
     
     # Nếu ảnh không có alpha, thêm alpha channel (đen = trong suốt)
     if len(img.shape) == 3 and img.shape[2] == 3:  # BGR
-        # Làm mượt RGB channels
-        rgb_smooth = cv2.bilateralFilter(img, 9, 75, 75)
+        # Làm mượt RGB channels mạnh hơn
+        rgb_smooth = cv2.bilateralFilter(img, 15, 100, 100)
         alpha = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8) * 255
         result = cv2.merge([rgb_smooth[:, :, 0], rgb_smooth[:, :, 1], rgb_smooth[:, :, 2], alpha])
         return result
@@ -140,11 +140,11 @@ def process_pipeline(input_dir, clean_dir, svg_dir):
             mode="spline",            # Đường cong Bezier mượt
             filter_speckle=2,         # Giảm ngưỡng để giữ nhiều chi tiết màu hơn
             color_precision=12,       # Tăng độ chính xác màu để giảm quantization
-            layer_difference=8,       # Giảm phân tách vùng để giữ nhiều màu hơn
-            corner_threshold=20,      # Giảm ngưỡng góc để đường cong mượt hơn
-            length_threshold=4.0,     # Tăng ngưỡng độ dài đường cong để loại bỏ các đoạn ngắn
+            layer_difference=4,       # Giảm thêm để gộp các vùng màu tương tự lại với nhau
+            corner_threshold=10,      # Giảm thêm để đường cong mượt hơn ở các góc
+            length_threshold=2.0,     # Giảm để bắt nhiều chi tiết đường cong hơn
             max_iterations=25,        # Tăng iterations để hội tụ tốt hơn
-            splice_threshold=20,      # Giảm ngưỡng nối đường để đường cong mượt hơn
+            splice_threshold=10,      # Giảm thêm để nối đường mượt hơn
             path_precision=12         # Tăng precision đường cong
         )
 
