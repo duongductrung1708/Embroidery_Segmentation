@@ -136,11 +136,11 @@ def process_pipeline(input_dir, clean_dir, svg_dir):
             clean_path,
             svg_path,
             colormode="color",        # Giữ nguyên màu
-            hierarchical="stacked",   # Tách layer
+            hierarchical="cutout",   # Tách vùng màu riêng biệt thay vì xếp chồng
             mode="spline",            # Đường cong Bezier mượt
-            filter_speckle=4,         # Tăng ngưỡng khử nhiễu để làm mượt hơn
+            filter_speckle=2,         # Giảm ngưỡng để giữ nhiều chi tiết màu hơn
             color_precision=12,       # Tăng độ chính xác màu để giảm quantization
-            layer_difference=12,      # Tăng phân tách vùng màu
+            layer_difference=8,       # Giảm phân tách vùng để giữ nhiều màu hơn
             corner_threshold=20,      # Giảm ngưỡng góc để đường cong mượt hơn
             length_threshold=4.0,     # Tăng ngưỡng độ dài đường cong để loại bỏ các đoạn ngắn
             max_iterations=25,        # Tăng iterations để hội tụ tốt hơn
