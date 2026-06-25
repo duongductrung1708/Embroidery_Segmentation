@@ -9,9 +9,14 @@ def clean_rgba_image(img):
     """
     Làm sạch kênh Alpha (trong suốt) bằng cách khử nhiễu,
     giữ nguyên format RGBA để vtracer có thể tạo SVG với nền trong suốt.
+    Đồng thời làm mượt cả RGB channels để giảm nhọn nhô từ ảnh gốc.
     """
     if len(img.shape) == 3 and img.shape[2] == 4:  # RGBA
         alpha = img[:, :, 3]
+        rgb = img[:, :, :3]
+        
+        # Làm mượt RGB channels bằng bilateral filter để giữ cạnh nhưng giảm nhiễu
+        rgb_smooth = cv2.bilateralFilter(rgb, 9, 75, 75)
         
         # Làm mượt alpha channel bằng Gaussian blur để giảm răng cưa
         alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
@@ -21,16 +26,19 @@ def clean_rgba_image(img):
         alpha_clean = cv2.morphologyEx(alpha, cv2.MORPH_OPEN, kernel)
         alpha_clean = cv2.morphologyEx(alpha_clean, cv2.MORPH_CLOSE, kernel)
         
-        # Cập nhật alpha channel đã làm sạch
-        result = img.copy()
+        # Cập nhật alpha channel đã làm sạch và RGB đã làm mượt
+        result = np.zeros_like(img)
+        result[:, :, :3] = rgb_smooth
         result[:, :, 3] = alpha_clean
         
         return result
     
     # Nếu ảnh không có alpha, thêm alpha channel (đen = trong suốt)
     if len(img.shape) == 3 and img.shape[2] == 3:  # BGR
+        # Làm mượt RGB channels
+        rgb_smooth = cv2.bilateralFilter(img, 9, 75, 75)
         alpha = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8) * 255
-        result = cv2.merge([img[:, :, 0], img[:, :, 1], img[:, :, 2], alpha])
+        result = cv2.merge([rgb_smooth[:, :, 0], rgb_smooth[:, :, 1], rgb_smooth[:, :, 2], alpha])
         return result
     
     return img
@@ -75,13 +83,13 @@ def process_pipeline(input_dir, clean_dir, svg_dir):
             colormode="color",        # Giữ nguyên màu
             hierarchical="stacked",   # Tách layer
             mode="spline",            # Đường cong Bezier mượt
-            filter_speckle=1,         # Giảm ngưỡng khử nhiễu để giữ chi tiết
+            filter_speckle=4,         # Tăng ngưỡng khử nhiễu để làm mượt hơn
             color_precision=12,       # Tăng độ chính xác màu để giảm quantization
             layer_difference=12,      # Tăng phân tách vùng màu
-            corner_threshold=50,      # Giảm ngưỡng góc để đường cong mượt hơn
-            length_threshold=1.5,     # Giảm ngưỡng độ dài đường cong
+            corner_threshold=20,      # Giảm ngưỡng góc để đường cong mượt hơn
+            length_threshold=4.0,     # Tăng ngưỡng độ dài đường cong để loại bỏ các đoạn ngắn
             max_iterations=25,        # Tăng iterations để hội tụ tốt hơn
-            splice_threshold=40,      # Giảm ngưỡng nối đường
+            splice_threshold=20,      # Giảm ngưỡng nối đường để đường cong mượt hơn
             path_precision=12         # Tăng precision đường cong
         )
 
