@@ -1,15 +1,7 @@
-torch
-torchvision
+vtracer
 opencv-python
 numpy
-pyembroidery
-matplotlib
 tqdm
-wandb
-albumentations
-pillow
-scikit-learn
-vtracer
-fal-client
 requests
 pillow
+fal-client
