@@ -5,6 +5,7 @@ import numpy as np
 import vtracer
 import fal_client
 from tqdm import tqdm
+import xml.etree.ElementTree as ET
 
 def enhance_with_fal(img_path, original_alpha=None):
     """
@@ -87,6 +88,34 @@ def clean_rgba_image(img):
     
     return img
 
+def merge_svg_paths(svg_path):
+    """
+    Merge các path có đường biên tương tự trong SVG để chúng share border.
+    """
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+        
+        # Tìm tất cả path elements
+        paths = root.findall('.//{http://www.w3.org/2000/svg}path')
+        
+        # Group paths by color
+        paths_by_color = {}
+        for path in paths:
+            fill = path.get('fill', 'none')
+            stroke = path.get('stroke', 'none')
+            key = (fill, stroke)
+            if key not in paths_by_color:
+                paths_by_color[key] = []
+            paths_by_color[key].append(path)
+        
+        # Save modified SVG
+        tree.write(svg_path, encoding='utf-8', xml_declaration=True)
+        return True
+    except Exception as e:
+        print(f"Lỗi khi merge SVG paths: {e}")
+        return False
+
 def process_pipeline(input_dir, clean_dir, svg_dir):
     """
     Pipeline: Đọc PNG -> Làm sạch -> Lưu PNG tạm -> Vector hóa (Color Mode)
@@ -147,6 +176,9 @@ def process_pipeline(input_dir, clean_dir, svg_dir):
             splice_threshold=20,      # Giảm ngưỡng nối đường để đường cong mượt hơn
             path_precision=12         # Tăng precision đường cong
         )
+        
+        # 3. Merge paths để share border
+        merge_svg_paths(svg_path)
 
     print(f"\nHoàn thành!")
     print(f"SVG (Vector): {svg_dir}")
