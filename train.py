@@ -51,7 +51,14 @@ def main():
 
     # --- TẬP TRACKING: Kính lúp Góc Rộng (Tuyệt đối không cắt) ---
     tracking_transform = A.Compose([
-        A.Resize(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE),
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.PadIfNeeded(
+            min_height=TEMP_IMAGE_SIZE, 
+            min_width=TEMP_IMAGE_SIZE, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            value=0, 
+            mask_value=0
+        ),
         ToTensorV2()
     ])
 
@@ -60,7 +67,7 @@ def main():
     # ==========================================
     train_dataset = EmbroideryDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
     val_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=max(1, TEMP_CROPS // 2))
-    tracking_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=tracking_transform, resize_factor=1.0, crops_per_image=1)
+    tracking_dataset = EmbroideryDataset(image_dir="data/val/images", mask_dir="data/val/masks", transform=tracking_transform, resize_factor=0.5, crops_per_image=1)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
@@ -68,6 +75,9 @@ def main():
 
     num_train_images = len(train_dataset) // TEMP_CROPS 
     num_val_images = len(val_dataset) // max(1, TEMP_CROPS // 2)
+
+    print(f"Number of training images: {num_train_images}")
+    print(f"Number of validation images: {num_val_images}")
 
     # ==========================================
     # 3. KHỞI TẠO WANDB & THIẾT BỊ
