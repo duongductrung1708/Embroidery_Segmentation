@@ -8,11 +8,14 @@ import os
 import sys
 import cv2
 import numpy as np
+from pathlib import Path
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Xác định đường dẫn gốc của dự án (Lùi 2 cấp từ file hiện tại: train_logo.py -> training -> scripts -> Embroidery_Segmentation)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT)) # Dùng insert(0) để ưu tiên tìm trong thư mục dự án trước
 
 from src.dataset_logo import EmbroideryDatasetLogo
 from src.model import U2NET 
