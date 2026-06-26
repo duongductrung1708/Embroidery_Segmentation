@@ -2,7 +2,9 @@
 
 ## Tổng quan
 
-Bước này chuyển đổi các ảnh PNG đã phân đoạn từ mô hình U-2-Net sang định dạng vector SVG tương thích với máy thêu. Pipeline hiện tại tích hợp fal.ai NAFNet để tăng chất lượng ảnh trước khi vector hóa.
+Bước này chuyển đổi các ảnh PNG đã phân đoạn từ mô hình U-2-Net sang định dạng vector SVG tương thích với máy thêu. Pipeline hiện tại tích hợp:
+- fal.ai NAFNet để tăng chất lượng ảnh trước khi vector hóa
+- Manual boolean cutout operations sử dụng shapely để tạo true single-layer SVG
 
 ## Mục đích
 
@@ -11,6 +13,7 @@ Bước này chuyển đổi các ảnh PNG đã phân đoạn từ mô hình U-
 - Duy trì độ chính xác màu cho mẫu thêu
 - Tạo đường dẫn sạch, mượt cho máy thêu
 - Tăng chất lượng ảnh bằng AI (NAFNet) trước khi vector hóa
+- Tạo true cutout SVG với zero overlap giữa các layers
 
 ## Triển khai
 
@@ -50,7 +53,32 @@ def clean_rgba_image(img):
 - **Morphology Operations**: Open/Close để loại bỏ nhiễu alpha channel
 - **Giữ nguyên RGBA**: Duy trì độ trong suốt thay vì ghép lên nền trắng
 
-**3. Pipeline Vector hóa (`process_pipeline`)**
+**3. Manual Boolean Cutout (`StrictCutoutProcessor`)**
+
+```python
+class StrictCutoutProcessor:
+    """Processes geometries sequentially from top to bottom to guarantee zero overlap."""
+```
+
+- **Top-to-Bottom Processing**: Xử lý từ layer trên cùng xuống dưới cùng
+- **Cumulative Upper Mask**: Tích hợp dần các layer trên vào mask để trừ từ layer dưới
+- **Zero Overlap Guarantee**: Đảm bảo mỗi coordinate space chỉ có 1 layer
+- **Micro-Buffer**: Sử dụng buffer nhỏ (1e-8) để tránh slivers từ shared edges
+- **Area Tolerance**: Lọc bỏ các phần có diện tích quá nhỏ (< 1e-5)
+
+**4. High-Precision SVG Parsing (`HighPrecisionSVGParser`)**
+
+```python
+class HighPrecisionSVGParser:
+    """High-precision SVG parser generating clean geometries."""
+```
+
+- **Multi-Element Support**: Parse rect, circle, ellipse, polygon, polyline, path
+- **Transform Parsing**: Hỗ trợ translate và matrix transforms
+- **Bezier Approximation**: 20-step approximation cho curves chính xác hơn
+- **Geometry Cleaning**: Buffer operations để fix self-intersections
+
+**5. Pipeline Vector hóa (`process_pipeline`)**
 
 - Quét nhiều định dạng ảnh (PNG, JPG, JPEG)
 - Trích xuất alpha channel gốc trước khi xử lý với fal.ai
@@ -65,11 +93,11 @@ vtracer.convert_image_to_svg_py(
     clean_path,
     svg_path,
     colormode="color",        # Giữ nguyên màu gốc
-    hierarchical="stacked",   # Tách layer
+    hierarchical="stack",     # Xếp chồng các vùng màu (sau đó xử lý cutout thủ công)
     mode="spline",            # Đường cong Bezier mượt
-    filter_speckle=4,         # Tăng ngưỡng khử nhiễu để làm mượt hơn
+    filter_speckle=2,         # Giảm ngưỡng để giữ nhiều chi tiết màu hơn
     color_precision=12,       # Độ chính xác màu cao
-    layer_difference=12,      # Phân tách màu tốt hơn
+    layer_difference=4,       # Giảm thêm để gộp các vùng màu tương tự lại với nhau
     corner_threshold=20,      # Giảm ngưỡng góc để đường cong mượt hơn
     length_threshold=4.0,     # Tăng ngưỡng độ dài đường cong để loại bỏ các đoạn ngắn
     max_iterations=25,        # Số lần lặp hội tụ
@@ -77,6 +105,20 @@ vtracer.convert_image_to_svg_py(
     path_precision=12         # Độ chính xác đường cong
 )
 ```
+
+**6. Manual Cutout Conversion (`convert_stack_to_cutout`)**
+
+Sau khi vtracer tạo SVG với `hierarchical="stack"`, pipeline áp dụng manual boolean operations:
+
+```python
+def convert_stack_to_cutout(svg_path: str):
+    """Convert stacked SVG to cutout SVG by removing overlaps."""
+```
+
+- **Parse SVG**: Sử dụng `HighPrecisionSVGParser` để parse SVG paths sang Shapely geometries
+- **Apply Cutout**: Sử dụng `StrictCutoutProcessor` để thực hiện boolean difference operations
+- **Generate Output**: Export lại SVG với paths đã được đục lỗ (zero overlap)
+- **Preserve Attributes**: Giữ nguyên viewBox và các attributes từ SVG gốc
 
 ## Input/Output
 
@@ -120,15 +162,24 @@ vtracer.convert_image_to_svg_py(
 
 **Giải pháp**:
 - Giữ `color_precision=12` để độ chính xác màu cao
-- Giữ `layer_difference=12` để phân tách vùng màu tốt
+- Giữ `layer_difference=4` để phân tách vùng màu tốt
 - Duy trì `colormode="color"` để giữ đầy đủ màu
+
+### Thách thức 5: SVG Layers Overlap
+**Vấn đề**: vtracer's built-in `hierarchical="cutout"` không đủ chính xác, vẫn còn overlap giữa layers.
+
+**Giải pháp**:
+- Sử dụng `hierarchical="stack"` để tạo layered SVG
+- Áp dụng manual boolean operations với shapely
+- `StrictCutoutProcessor` xử lý top-to-bottom với cumulative mask
+- Đảm bảo zero overlap giữa các layers cho laser cutting/embroidery
 
 ## Cách sử dụng
 
 ### Cài đặt Dependencies
 
 ```bash
-pip install opencv-python numpy vtracer fal-client requests pillow tqdm
+pip install opencv-python numpy vtracer fal-client requests pillow tqdm shapely
 ```
 
 ### Cấu hình API Key
@@ -153,12 +204,14 @@ sh run_prep.sh
 ## Dependencies
 
 - `opencv-python` - Xử lý ảnh
-- `numpy` - Thao tác mảng
+- `numpy` - Thao tác mảng và transform matrices
 - `vtracer` - Chuyển đổi raster sang vector
 - `fal-client` - Client cho fal.ai API
 - `requests` - HTTP requests để tải ảnh từ fal.ai
 - `pillow` - Xử lý ảnh PIL
 - `tqdm` - Thanh tiến trình
+- `shapely` - Computational geometry cho boolean operations
+- `cairosvg` - SVG rendering (optional)
 
 ## Các bước tiếp theo
 
@@ -173,3 +226,5 @@ Sau khi chuyển đổi SVG, giai đoạn tiếp theo bao gồm:
 - fal.ai NAFNet thêm khoảng 20-30s mỗi ảnh nhưng cải thiện chất lượng đáng kể
 - Alpha channel binary giúp file SVG nhẹ hơn nhiều so với gradient alpha
 - Nếu fal.ai không phản hồi, pipeline tự động fallback về ảnh gốc
+- Manual boolean cutout đảm bảo zero overlap giữa layers cho laser cutting/embroidery
+- Pipeline tự động xử lý từ dirty_png → clean_png → svg với cutout

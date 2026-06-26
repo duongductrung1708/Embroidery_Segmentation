@@ -6,3 +6,4 @@ requests
 pillow
 fal-client
 cairosvg
+shapely
