@@ -123,13 +123,13 @@ def convert_stack_to_cutout(svg_path: str):
 ## Input/Output
 
 ### Input
-- **Thư mục**: `data_prep/data/dirty_png/`
+- **Thư mục**: `data/lineart/train/images` (hoặc custom path)
 - **Định dạng**: PNG, JPG, JPEG (không phân biệt hoa thường)
 - **Yêu cầu**: Ảnh có hoặc không có kênh alpha
 
 ### Output
-- **PNG đã làm sạch**: `data_prep/data/clean_png/` - Ảnh đã tiền xử lý với alpha sắc lẹm (binary)
-- **File SVG**: `data_prep/data/svg/` - Mẫu thêu đã vector hóa
+- **PNG đã làm sạch**: `data/lineart/train/clean/` - Ảnh đã tiền xử lý với alpha sắc lẹm (binary)
+- **File SVG**: `data/svg/logo/` - Mẫu thêu đã vector hóa
 
 ## Thách thức & Giải pháp
 
@@ -191,14 +191,8 @@ export FAL_KEY="your-api-key-here"
 ### Chạy Pipeline
 
 ```bash
-cd data_prep
+cd scripts/data_prep
 python3 png_to_svg.py
-```
-
-Hoặc sử dụng script:
-
-```bash
-sh run_prep.sh
 ```
 
 ## Dependencies
@@ -220,8 +214,164 @@ Sau khi chuyển đổi SVG, giai đoạn tiếp theo bao gồm:
 - Đơn giản hóa đường dẫn và tạo mũi thêu
 - Chuyổi đổi định dạng sang format riêng của máy (PES, DST, v.v.)
 
+---
+
+# Giai đoạn 2 - Bước 2: Chuyển đổi SVG sang PNG với Labels cho Training
+
+## Tổng quan
+
+Bước này chuyển đổi các file SVG có metadata (inkscape:label) sang ảnh PNG và label masks để huấn luyện model segmentation. Pipeline hỗ trợ:
+- Đọc metadata từ `inkscape:label` attribute trong SVG paths
+- Render SVG thành PNG với nền trong suốt
+- Tạo label mask dựa trên stitch type (fill/satin)
+- Hỗ trợ 3-class segmentation: background (0), fill (1), satin (2)
+
+## Mục đích
+
+- Tạo dataset training từ SVG có metadata
+- Giữ nguyên kích thước gốc SVG
+- Tạo label mask chính xác dựa trên alpha channel
+- Hỗ trợ fine-tune model với dataset logo màu
+
+## Triển khai
+
+### File: `data_prep/svg_to_png_with_labels.py`
+
+#### Các thành phần chính
+
+**1. Parse SVG Metadata (`parse_svg_with_metadata`)**
+
+```python
+def parse_svg_with_metadata(svg_path: str) -> Tuple[ET.Element, Dict[str, str]]:
+    """Parse SVG file and extract stitch type metadata from paths using inkscape:label."""
+```
+
+- Đọc `inkscape:label` attribute từ mỗi path
+- Normalize metadata với `strip().lower()`
+- Trả về dictionary mapping path_id → stitch_type
+
+**2. Get SVG Dimensions (`get_svg_dimensions`)**
+
+```python
+def get_svg_dimensions(svg_path: str) -> Tuple[int, int]:
+    """Get original SVG dimensions from viewBox or width/height attributes."""
+```
+
+- Đọc kích thước từ viewBox hoặc width/height attributes
+- Hỗ trợ nhiều đơn vị (px, mm, cm, %) với regex
+- Fallback về 512x512 nếu không tìm thấy
+
+**3. Create Label Mask (`create_label_mask`)**
+
+```python
+def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str, str]) -> np.ndarray:
+    """Create label mask from SVG metadata by rendering paths in SVG order."""
+```
+
+- Render từng path theo thứ tự SVG để giữ đúng layer order
+- Sử dụng RGBA alpha channel để xác định pixel thuộc path
+- Map stitch type sang label: fill → 1, satin → 2
+- Overwrite mask theo thứ tự SVG để xử lý vùng chồng lấp
+
+**4. Render SVG to PNG (`render_svg_to_png`)**
+
+```python
+def render_svg_to_png(svg_path: str, output_path: str, width: int = None, height: int = None):
+    """Render SVG to PNG image with transparent background."""
+```
+
+- Sử dụng cairosvg với `background_color=None` để giữ transparency
+- Thêm `unsafe=True` để tăng tương thích với Inkscape SVG
+- Giữ nguyên kích thước gốc nếu không chỉ định width/height
+
+**5. Process SVG Folder (`process_svg_folder`)**
+
+- Duyệt đệ quy thư mục với `rglob("*.svg")`
+- Tạo dataset từ SVG với metadata
+- Lưu images và masks vào thư mục output
+
+## Input/Output
+
+### Input
+- **Thư mục**: `data/svg/logo/` (hoặc custom path)
+- **Định dạng**: SVG với `inkscape:label` attribute
+- **Metadata**: `inkscape:label="fill"` hoặc `inkscape:label="satin"`
+
+### Output
+- **PNG Images**: `data/logo/easy/images/` - Ảnh SVG đã render với nền trong suốt
+- **Label Masks**: `data/logo/easy/masks/` - Mask grayscale với 3 giá trị (0, 1, 2)
+
+## Label Mapping
+
+- **0**: Background (trong suốt)
+- **1**: Fill stitch
+- **2**: Satin stitch
+
+## Cách sử dụng
+
+### Cài đặt Dependencies
+
+```bash
+pip install opencv-python numpy xml.etree.ElementTree cairosvg pillow tqdm
+```
+
+### Chạy Pipeline
+
+```bash
+cd scripts/data_prep
+python3 svg_to_png_with_labels.py
+```
+
+Hoặc với custom paths:
+
+```bash
+python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/images --output-mask path/to/masks
+```
+
+### Tham số
+
+- `--svg-dir`: Thư mục chứa SVG (default: `data/svg/logo`)
+- `--output-img`: Thư mục output images (default: `data/logo/easy/images`)
+- `--output-mask`: Thư mục output masks (default: `data/logo/easy/masks`)
+- `--width`: Kích thước output width (default: original SVG size)
+- `--height`: Kích thước output height (default: original SVG size)
+
+## Training với Dataset Logo
+
+### Phiên bản Train
+
+**1. train.py - Dataset Line-art (2-class)**
+- Dataset: `data/lineart/train/images`, `data/lineart/train/masks`
+- Model: `U2NET(in_ch=1, out_ch=2)`
+- Labels: 0=background, 1=fill
+- Checkpoint: `checkpoints/lineart/u2net_last.pth`, `checkpoints/lineart/u2net_best.pth`
+
+**2. train_logo.py - Dataset Logo (3-class)**
+- Dataset: `data/logo/easy/images`, `data/logo/easy/masks`
+- Model: `U2NET(in_ch=1, out_ch=3)`
+- Labels: 0=background, 1=fill, 2=satin
+- Checkpoint: `checkpoints/logo/u2net_logo_last.pth`, `checkpoints/logo/u2net_logo_best.pth`
+- Sử dụng: `dataset_logo.py`, `utils_logo.py`
+
+### Chạy Training
+
+```bash
+# Train line-art (2-class)
+python scripts/training/train.py
+
+# Train logo (3-class)
+python scripts/training/train_logo.py
+```
+
 ## Ghi chú
 
+**SVG to PNG Pipeline:**
+- Pipeline render từng path theo thứ tự SVG để giữ đúng layer order
+- Alpha channel được sử dụng thay vì grayscale threshold để độ chính xác cao hơn
+- Model 3-class train từ đầu, không load checkpoint từ model 2-class
+- Learning rate khuyến nghị: 1e-4 hoặc 5e-5 cho fine-tune
+
+**PNG to SVG Pipeline:**
 - Thời gian xử lý phụ thuộc vào độ phức tạp và kích thước ảnh
 - fal.ai NAFNet thêm khoảng 20-30s mỗi ảnh nhưng cải thiện chất lượng đáng kể
 - Alpha channel binary giúp file SVG nhẹ hơn nhiều so với gradient alpha

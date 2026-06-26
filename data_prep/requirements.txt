@@ -1,9 +1,0 @@
-vtracer
-opencv-python
-numpy
-tqdm
-requests
-pillow
-fal-client
-cairosvg
-shapely

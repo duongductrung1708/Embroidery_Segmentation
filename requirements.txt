@@ -12,4 +12,5 @@ scikit-learn
 vtracer
 fal-client
 requests
-pillow
+cairosvg
+shapely
