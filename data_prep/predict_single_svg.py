@@ -1,13 +1,20 @@
+#!/usr/bin/env python3
+"""
+Single Image PNG to SVG Converter with Manual Boolean Cutout
+Convert a single PNG image to SVG with true cutout (zero overlap).
+"""
+
 import os
-import glob
+import sys
 import cv2
 import numpy as np
 import vtracer
 import fal_client
-from tqdm import tqdm
 import xml.etree.ElementTree as ET
 import re
+import argparse
 from typing import List, Tuple, Dict, Optional, Union
+from pathlib import Path
 
 try:
     from shapely.geometry import Polygon, MultiPolygon
@@ -16,11 +23,13 @@ try:
 except ImportError:
     print("Installing shapely and numpy...")
     import subprocess
-    import sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely", "numpy"])
     from shapely.geometry import Polygon, MultiPolygon
     from shapely.ops import unary_union
     import numpy as np
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def enhance_with_fal(img_path, original_alpha=None):
     """
@@ -56,15 +65,17 @@ def enhance_with_fal(img_path, original_alpha=None):
         elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA)
         
-        # Nếu có alpha channel gốc, dán lại vào ảnh đã xử lý
+        # If original has alpha, restore it
         if original_alpha is not None:
-            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                img_array = cv2.merge([img_array[:, :, 0], img_array[:, :, 1], img_array[:, :, 2], original_alpha])
+            if img_array.shape[2] == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2BGRA)
+                img_array[:, :, 3] = original_alpha
         
         return img_array
     except Exception as e:
-        print(f"Lỗi khi xử lý với fal.ai: {e}")
-        return None
+        print(f"  Warning: Fal.ai enhancement failed: {e}. Using original image.")
+        return cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+
 
 def clean_rgba_image(img):
     """
@@ -72,66 +83,40 @@ def clean_rgba_image(img):
     giữ nguyên format RGBA để vtracer có thể tạo SVG với nền trong suốt.
     Đồng thời làm mượt cả RGB channels để giảm nhọn nhô từ ảnh gốc.
     """
-    if len(img.shape) == 3 and img.shape[2] == 4:  # RGBA
+    if len(img.shape) == 3 and img.shape[2] == 4:
         alpha = img[:, :, 3]
-        rgb = img[:, :, :3]
+    else:
+        alpha = None
+    
+    # Process RGB channels
+    if len(img.shape) == 3:
+        if img.shape[2] == 4:
+            rgb = img[:, :, :3]
+        else:
+            rgb = img
+            alpha = None
         
-        # Làm mượt RGB channels bằng bilateral filter để giữ cạnh nhưng giảm nhiễu
+        # Bilateral filter to smooth while preserving edges
         rgb_smooth = cv2.bilateralFilter(rgb, 9, 75, 75)
-        
-        # Làm SẮC LẸM alpha channel bằng Threshold thay vì Blur
-        # vtracer cần alpha binary (0 hoặc 255) để tránh tạo hàng ngàn vector path
+    else:
+        rgb_smooth = img
+    
+    # Process alpha channel with threshold (binary)
+    if alpha is not None:
         _, alpha_binary = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
         
-        # Khử nhiễu alpha channel bằng morphology
+        # Morphology operations to clean alpha
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         alpha_clean = cv2.morphologyEx(alpha_binary, cv2.MORPH_OPEN, kernel)
         alpha_clean = cv2.morphologyEx(alpha_clean, cv2.MORPH_CLOSE, kernel)
         
-        # Cập nhật alpha channel đã làm sạch và RGB đã làm mượt
-        result = np.zeros_like(img)
-        result[:, :, :3] = rgb_smooth
+        # Combine
+        result = cv2.cvtColor(rgb_smooth, cv2.COLOR_RGB2RGBA)
         result[:, :, 3] = alpha_clean
-        
-        return result
+    else:
+        result = rgb_smooth
     
-    # Nếu ảnh không có alpha, thêm alpha channel (đen = trong suốt)
-    if len(img.shape) == 3 and img.shape[2] == 3:  # BGR
-        # Làm mượt RGB channels
-        rgb_smooth = cv2.bilateralFilter(img, 9, 75, 75)
-        alpha = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8) * 255
-        result = cv2.merge([rgb_smooth[:, :, 0], rgb_smooth[:, :, 1], rgb_smooth[:, :, 2], alpha])
-        return result
-    
-    return img
-
-def merge_svg_paths(svg_path):
-    """
-    Merge các path có đường biên tương tự trong SVG để chúng share border.
-    """
-    try:
-        tree = ET.parse(svg_path)
-        root = tree.getroot()
-        
-        # Tìm tất cả path elements
-        paths = root.findall('.//{http://www.w3.org/2000/svg}path')
-        
-        # Group paths by color
-        paths_by_color = {}
-        for path in paths:
-            fill = path.get('fill', 'none')
-            stroke = path.get('stroke', 'none')
-            key = (fill, stroke)
-            if key not in paths_by_color:
-                paths_by_color[key] = []
-            paths_by_color[key].append(path)
-        
-        # Save modified SVG
-        tree.write(svg_path, encoding='utf-8', xml_declaration=True)
-        return True
-    except Exception as e:
-        print(f"Lỗi khi merge SVG paths: {e}")
-        return False
+    return result
 
 
 class SVGElement:
@@ -504,6 +489,28 @@ class StrictCutoutProcessor:
         return processed_elements
 
 
+def _polygon_to_path(polygon: Polygon) -> str:
+    if polygon.is_empty:
+        return ""
+    coords = list(polygon.exterior.coords)
+    if len(coords) < 3:
+        return ""
+
+    path_data = f"M {coords[0][0]:.5f},{coords[0][1]:.5f}"
+    for coord in coords[1:]:
+        path_data += f" L {coord[0]:.5f},{coord[1]:.5f}"
+    path_data += " Z"
+
+    for interior in polygon.interiors:
+        hole_coords = list(interior.coords)
+        if len(hole_coords) >= 3:
+            path_data += f" M {hole_coords[0][0]:.5f},{hole_coords[0][1]:.5f}"
+            for coord in hole_coords[1:]:
+                path_data += f" L {coord[0]:.5f},{coord[1]:.5f}"
+            path_data += " Z"
+    return path_data
+
+
 def convert_stack_to_cutout(svg_path: str):
     """Convert stacked SVG to cutout SVG by removing overlaps."""
     try:
@@ -547,7 +554,13 @@ def convert_stack_to_cutout(svg_path: str):
         elements_added = 0
         for element in cutout_elements:
             if element.geometry and not element.geometry.is_empty:
-                path_data = _geometry_to_svg_path(element.geometry)
+                if isinstance(element.geometry, Polygon):
+                    path_data = _polygon_to_path(element.geometry)
+                else:
+                    path_data = " ".join(
+                        [_polygon_to_path(p) for p in element.geometry.geoms]
+                    )
+
                 if path_data:
                     path_elem = ET.SubElement(new_root, "path")
                     path_elem.set("d", path_data)
@@ -567,118 +580,102 @@ def convert_stack_to_cutout(svg_path: str):
         return False
 
 
-def _geometry_to_svg_path(geometry: Union[Polygon, MultiPolygon]) -> str:
-    """Convert Shapely geometry to SVG path."""
-    if isinstance(geometry, Polygon):
-        return _polygon_to_path(geometry)
-    elif isinstance(geometry, MultiPolygon):
-        paths = [_polygon_to_path(poly) for poly in geometry.geoms]
-        return " ".join(paths)
-    return ""
-
-
-def _polygon_to_path(polygon: Polygon) -> str:
-    """Convert Polygon to SVG path."""
-    if polygon.is_empty:
-        return ""
+def process_single_image(input_path: str, output_path: str = None, use_fal: bool = True):
+    """Process a single image through the pipeline."""
     
-    coords = list(polygon.exterior.coords)
-    if len(coords) < 3:
-        return ""
+    # Define folder paths
+    dirty_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "dirty_png")
+    clean_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "clean_png")
+    svg_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "svg")
     
-    path_data = f"M {coords[0][0]:.6f},{coords[0][1]:.6f}"
-    for coord in coords[1:]:
-        path_data += f" L {coord[0]:.6f},{coord[1]:.6f}"
-    path_data += " Z"
-    
-    for interior in polygon.interiors:
-        hole_coords = list(interior.coords)
-        if len(hole_coords) >= 3:
-            path_data += f" M {hole_coords[0][0]:.6f},{hole_coords[0][1]:.6f}"
-            for coord in hole_coords[1:]:
-                path_data += f" L {coord[0]:.6f},{coord[1]:.6f}"
-            path_data += " Z"
-    
-    return path_data
-
-def process_pipeline(input_dir, clean_dir, svg_dir):
-    """
-    Pipeline: Đọc PNG -> Làm sạch -> Lưu PNG tạm -> Vector hóa (Color Mode)
-    """
+    # Ensure folders exist
     os.makedirs(clean_dir, exist_ok=True)
     os.makedirs(svg_dir, exist_ok=True)
-
-    # Quét tất cả các định dạng ảnh phổ biến
-    image_paths = []
-    for ext in ('*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG'): 
-        image_paths.extend(glob.glob(os.path.join(input_dir, ext)))
-
-    if not image_paths:
-        print(f"Không tìm thấy ảnh nào trong thư mục: {input_dir}")
-        return
-
-    print(f"Bắt đầu xử lý {len(image_paths)} ảnh...")
-
-    for img_path in tqdm(image_paths, desc="Vector hóa"):
-        filename = os.path.basename(img_path)
-        name, _ = os.path.splitext(filename)
-
-        clean_path = os.path.join(clean_dir, f"{name}.png")
-        svg_path = os.path.join(svg_dir, f"{name}.svg")
-
-        # 1. Đọc ảnh & Làm sạch
-        img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            continue
-        
-        # Trích xuất alpha channel gốc trước khi xử lý với fal.ai
-        original_alpha = None
-        if len(img.shape) == 3 and img.shape[2] == 4:
-            original_alpha = img[:, :, 3].copy()
-        
-        # 1.1 Tăng chất lượng ảnh với fal.ai NAFNet
-        enhanced_img = enhance_with_fal(img_path, original_alpha)
-        if enhanced_img is not None:
-            img = enhanced_img
-            print(f"  Đã tăng chất lượng với fal.ai: {filename}")
-        
-        clean_img = clean_rgba_image(img)
-        cv2.imwrite(clean_path, clean_img)
-
-        # 2. Vector hóa (Chế độ color để giữ màu logo và transparency)
+    
+    # If input is just filename, prepend dirty_dir
+    if not os.path.isabs(input_path) and not os.path.exists(input_path):
+        input_path = os.path.join(dirty_dir, input_path)
+    
+    # Validate input
+    if not os.path.exists(input_path):
+        print(f"Error: Input file not found: {input_path}")
+        return False
+    
+    # Get filename without extension
+    input_file = Path(input_path)
+    filename = input_file.stem
+    
+    # Determine paths
+    clean_path = os.path.join(clean_dir, f"{filename}.png")
+    
+    if output_path is None:
+        output_path = os.path.join(svg_dir, f"{filename}.svg")
+    elif not os.path.isabs(output_path):
+        output_path = os.path.join(svg_dir, output_path)
+    
+    print(f"Processing: {input_path}")
+    print(f"Clean PNG: {clean_path}")
+    print(f"Output SVG: {output_path}")
+    
+    # Load image
+    img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        print(f"Error: Cannot load image: {input_path}")
+        return False
+    
+    # Extract alpha channel if exists
+    original_alpha = None
+    if len(img.shape) == 3 and img.shape[2] == 4:
+        original_alpha = img[:, :, 3].copy()
+    
+    # Enhance with fal.ai if requested
+    if use_fal:
+        print("  Đang tăng chất lượng với fal.ai...")
+        img = enhance_with_fal(input_path, original_alpha)
+    
+    # Clean RGBA image
+    print("  Đang làm sạch ảnh...")
+    clean_img = clean_rgba_image(img)
+    
+    # Save clean image to clean_png folder
+    cv2.imwrite(clean_path, clean_img)
+    
+    # Vectorize with vtracer
+    print("  Đang vector hóa...")
+    try:
         vtracer.convert_image_to_svg_py(
             clean_path,
-            svg_path,
-            colormode="color",        # Giữ nguyên màu
-            hierarchical="stack",   # Tách vùng màu riêng biệt thay vì xếp chồng
-            mode="spline",            # Đường cong Bezier mượt
-            filter_speckle=2,         # Giảm ngưỡng để giữ nhiều chi tiết màu hơn
-            color_precision=12,       # Tăng độ chính xác màu để giảm quantization
-            layer_difference=4,       # Giảm thêm để gộp các vùng màu tương tự lại với nhau
-            corner_threshold=20,      # Giảm ngưỡng góc để đường cong mượt hơn
-            length_threshold=4.0,     # Tăng ngưỡng độ dài đường cong để loại bỏ các đoạn ngắn
-            max_iterations=25,        # Tăng iterations để hội tụ tốt hơn
-            splice_threshold=20,      # Giảm ngưỡng nối đường để đường cong mượt hơn
-            path_precision=12         # Tăng precision đường cong
+            output_path,
+            colormode="color",
+            hierarchical="stack",
+            mode="spline",
+            filter_speckle=2,
+            color_precision=12,
+            layer_difference=4,
+            corner_threshold=20,
+            length_threshold=4.0,
+            max_iterations=25,
+            splice_threshold=20,
+            path_precision=12
         )
-        
-        # 3. Convert stacked SVG to cutout (remove overlaps using boolean operations)
-        convert_stack_to_cutout(svg_path)
+    except Exception as e:
+        print(f"Error during vectorization: {e}")
+        return False
+    
+    # Apply manual cutout
+    print("  Đang áp dụng Boolean Cutout...")
+    convert_stack_to_cutout(output_path)
+    
+    print(f"Hoàn thành!")
+    print(f"  Clean PNG: {clean_path}")
+    print(f"  SVG: {output_path}")
+    return True
 
-    print(f"\nHoàn thành! Các SVG đã được đục lỗ (True Cutout) nằm tại: {svg_dir}")
 
 if __name__ == "__main__":
-    # Lấy thư mục hiện tại là data_prep/
-    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+    # Hardcoded input - can be filename (looks in dirty_png) or full path
+    INPUT_PATH = "10.png"  # Will look in data_prep/data/dirty_png/1.png
+    OUTPUT_PATH = None  # Auto-generate as filename.svg in svg folder
+    USE_FAL = True  # Set to False to skip fal.ai enhancement
     
-    # Đi ngược lên 1 cấp (..) rồi vào thư mục data/
-    PROJECT_ROOT = os.path.dirname(CURRENT_DIR) 
-    
-    # Trỏ đến đúng các thư mục bạn mong muốn
-    INPUT_DIR = os.path.join(PROJECT_ROOT, "data_prep", "data", "dirty_png")
-    CLEAN_DIR = os.path.join(PROJECT_ROOT, "data_prep", "data", "clean_png")
-    SVG_DIR = os.path.join(PROJECT_ROOT, "data_prep", "data", "svg")
-
-    print(f"DEBUG: PATH INPUT = {INPUT_DIR}")
-    
-    process_pipeline(INPUT_DIR, CLEAN_DIR, SVG_DIR)
+    process_single_image(INPUT_PATH, OUTPUT_PATH, use_fal=USE_FAL)
