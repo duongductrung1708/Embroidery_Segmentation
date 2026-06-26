@@ -584,9 +584,9 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
     """Process a single image through the pipeline."""
     
     # Define folder paths
-    dirty_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "dirty_png")
-    clean_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "clean_png")
-    svg_dir = os.path.join(PROJECT_ROOT, "data_prep", "data", "svg")
+    dirty_dir = os.path.join(PROJECT_ROOT, "data", "svg", "dirty_png")
+    clean_dir = os.path.join(PROJECT_ROOT, "data", "svg", "clean_png")
+    svg_dir = os.path.join(PROJECT_ROOT, "data", "svg", "logo")
     
     # Ensure folders exist
     os.makedirs(clean_dir, exist_ok=True)
