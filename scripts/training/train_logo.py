@@ -126,6 +126,10 @@ def main():
     
     LAST_CHECKPOINT_PATH = "checkpoints/logo/u2net_logo_last.pth"
     BEST_MODEL_PATH = "checkpoints/logo/u2net_logo_best.pth"
+
+    # ---- DÒNG CẦN THÊM VÀO LÀ ĐÂY ----
+    os.makedirs(os.path.dirname(LAST_CHECKPOINT_PATH), exist_ok=True)
+    # ----------------------------------
     
     start_epoch = 0
     best_val_f1 = 0.0
