@@ -28,7 +28,7 @@ except ImportError:
     from shapely.ops import unary_union
     import numpy as np
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def enhance_with_fal(img_path, original_alpha=None):
@@ -411,11 +411,12 @@ class HighPrecisionSVGParser:
 class StrictCutoutProcessor:
     """Processes geometries sequentially from top to bottom to guarantee zero overlap."""
 
-    def __init__(self):
+    def __init__(self, area_threshold=10.0):
         self.area_tolerance = 1e-5
         self.snap_buffer = (
             1e-8  # Micro-buffer to cleanly eliminate shared edge overlaps
         )
+        self.area_threshold = area_threshold  # Filter polygons smaller than this (px²)
 
     def create_cutouts(self, elements: List[SVGElement]) -> List[SVGElement]:
         print("  Thực hiện Boolean Cutout (Strict Top-to-Bottom)...")
@@ -432,8 +433,12 @@ class StrictCutoutProcessor:
 
             current_geom = elem.geometry
 
+            # Filter by area threshold
+            if current_geom.area < self.area_threshold:
+                continue
+
             if cumulative_upper_mask is None:
-                # Topmost element stays completely whole
+                # Topmost element stays completely whole (if above threshold)
                 elem.geometry = current_geom
                 processed_elements.append(elem)
                 cumulative_upper_mask = current_geom
@@ -452,7 +457,7 @@ class StrictCutoutProcessor:
                                 valid_parts = [
                                     p
                                     for p in cutout_geom.geoms
-                                    if p.area > self.area_tolerance
+                                    if p.area > self.area_tolerance and p.area >= self.area_threshold
                                 ]
                                 if valid_parts:
                                     elem.geometry = (
@@ -462,7 +467,7 @@ class StrictCutoutProcessor:
                                     )
                                     processed_elements.append(elem)
                             else:
-                                if cutout_geom.area > self.area_tolerance:
+                                if cutout_geom.area > self.area_tolerance and cutout_geom.area >= self.area_threshold:
                                     elem.geometry = cutout_geom
                                     processed_elements.append(elem)
                     except Exception as e:
@@ -511,11 +516,11 @@ def _polygon_to_path(polygon: Polygon) -> str:
     return path_data
 
 
-def convert_stack_to_cutout(svg_path: str):
+def convert_stack_to_cutout(svg_path: str, area_threshold=10.0):
     """Convert stacked SVG to cutout SVG by removing overlaps."""
     try:
         parser = HighPrecisionSVGParser()
-        processor = StrictCutoutProcessor()
+        processor = StrictCutoutProcessor(area_threshold=area_threshold)
         
         root, elements = parser.parse_file(svg_path)
         
@@ -640,7 +645,7 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
     # Save clean image to clean_png folder
     cv2.imwrite(clean_path, clean_img)
     
-    # Vectorize with vtracer
+    # Vectorize with vtracer (có thể crash với Python 3.14)
     print("  Đang vector hóa...")
     try:
         vtracer.convert_image_to_svg_py(
@@ -660,11 +665,18 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
         )
     except Exception as e:
         print(f"Error during vectorization: {e}")
+        print("  Bỏ qua bước vectorization, chỉ lưu clean PNG.")
+        # Copy clean PNG as fallback
+        import shutil
+        fallback_path = output_path.replace('.svg', '_fallback.png')
+        shutil.copy(clean_path, fallback_path)
+        print(f"  Đã lưu fallback: {fallback_path}")
+        print("  Gợi ý: Downgrade Python sang 3.11 hoặc 3.12 để vtracer hoạt động ổn định.")
         return False
     
     # Apply manual cutout
     print("  Đang áp dụng Boolean Cutout...")
-    convert_stack_to_cutout(output_path)
+    convert_stack_to_cutout(output_path, area_threshold=10.0)  # Filter polygons < 10px²
     
     print(f"Hoàn thành!")
     print(f"  Clean PNG: {clean_path}")
@@ -674,7 +686,7 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
 
 if __name__ == "__main__":
     # Hardcoded input - can be filename (looks in dirty_png) or full path
-    INPUT_PATH = "10.png"  # Will look in data_prep/data/dirty_png/1.png
+    INPUT_PATH = "21.png"  # Will look in data/svg/dirty_png/1.png
     OUTPUT_PATH = None  # Auto-generate as filename.svg in svg folder
     USE_FAL = True  # Set to False to skip fal.ai enhancement
     
