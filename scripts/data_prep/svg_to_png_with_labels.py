@@ -219,9 +219,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert SVG files with metadata to PNG images and label masks for training"
     )
-    parser.add_argument("--svg-dir", default="data/svg/logo", help="Input SVG directory")
-    parser.add_argument("--output-img", default="data/logo/easy/images", help="Output image directory")
-    parser.add_argument("--output-mask", default="data/logo/easy/masks", help="Output mask directory")
+    parser.add_argument("--svg-dir", default="data/svg/logo_new", help="Input SVG directory")
+    parser.add_argument("--output-img", default="data/svg/logo_label/images", help="Output image directory")
+    parser.add_argument("--output-mask", default="data/svg/logo_label/masks", help="Output mask directory")
     parser.add_argument("--width", type=int, default=None, help="Output image width (default: original SVG size)")
     parser.add_argument("--height", type=int, default=None, help="Output image height (default: original SVG size)")
     
