@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import os
@@ -31,7 +32,7 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768  # Tăng từ 512 lên 768 để giữ chi tiết nhỏ
     TEMP_CROPS = 1  # QUAN TRỌNG: Chỉ cần 1 vì giờ ta nạp nguyên ảnh toàn cảnh
-    BATCH_SIZE = 4
+    BATCH_SIZE = 2  # Giảm từ 4 xuống 2 để tránh OOM với resolution 768
     NUM_CLASSES = 3  # Background, Fill, Satin
 
     # --- TẬP TRAIN: THU NHỎ & CHÈN VIỀN TOÀN CẢNH ---
@@ -165,6 +166,7 @@ def main():
     active_lr = config.learning_rate
 
     optimizer = optim.Adam(model.parameters(), lr=active_lr)
+    scaler = GradScaler()  # Mixed Precision training
 
     if os.path.exists(LAST_CHECKPOINT_PATH):
         try:
@@ -203,23 +205,25 @@ def main():
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
             
-            outputs = model(images)  
-            boundary_targets = get_boundary_mask(masks, device, num_classes=NUM_CLASSES)
+            with autocast():
+                outputs = model(images)  
+                boundary_targets = get_boundary_mask(masks, device, num_classes=NUM_CLASSES)
+                
+                loss = 0.0
+                # Deep Supervision: Áp trọng số khác nhau cho từng output
+                for idx, d in enumerate(outputs):
+                    weight = deep_supervision_weights[idx]
+                    seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
+                    # Multi-class boundary loss: tính cho tất cả các lớp
+                    boundary_loss = 0.0
+                    for class_idx in range(NUM_CLASSES):
+                        boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
+                    boundary_loss /= NUM_CLASSES  # Average over classes
+                    loss += weight * (seg_loss + 0.5 * boundary_loss)
             
-            loss = 0.0
-            # Deep Supervision: Áp trọng số khác nhau cho từng output
-            for idx, d in enumerate(outputs):
-                weight = deep_supervision_weights[idx]
-                seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
-                # Multi-class boundary loss: tính cho tất cả các lớp
-                boundary_loss = 0.0
-                for class_idx in range(NUM_CLASSES):
-                    boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
-                boundary_loss /= NUM_CLASSES  # Average over classes
-                loss += weight * (seg_loss + 0.5 * boundary_loss)
-            
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_train_loss += loss.item()
             current_lr = optimizer.param_groups[0]['lr']
