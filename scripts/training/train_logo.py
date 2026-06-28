@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from tqdm import tqdm
 import wandb
 import os
@@ -166,7 +166,7 @@ def main():
     active_lr = config.learning_rate
 
     optimizer = optim.Adam(model.parameters(), lr=active_lr)
-    scaler = GradScaler()  # Mixed Precision training
+    scaler = GradScaler(device.type)  # Mixed Precision training
 
     if os.path.exists(LAST_CHECKPOINT_PATH):
         try:
