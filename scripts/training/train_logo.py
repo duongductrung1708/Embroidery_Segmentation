@@ -123,12 +123,12 @@ def main():
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
             "dataset": "Logo_3Class_V2",
-            "epochs": 50,
+            "epochs": 150,
             "batch_size": BATCH_SIZE,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
-            "fill_weight": 2.5, 
-            "satin_weight": 2.5,
+            "fill_weight": 2, 
+            "satin_weight": 4,
             "crops_per_image": TEMP_CROPS,
             "label_smoothing": 0.02
         }

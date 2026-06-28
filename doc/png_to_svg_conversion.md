@@ -3,6 +3,7 @@
 ## Tổng quan
 
 Bước này chuyển đổi các ảnh PNG đã phân đoạn từ mô hình U-2-Net sang định dạng vector SVG tương thích với máy thêu. Pipeline hiện tại tích hợp:
+
 - fal.ai NAFNet để tăng chất lượng ảnh trước khi vector hóa
 - Manual boolean cutout operations sử dụng shapely để tạo true single-layer SVG
 
@@ -123,52 +124,64 @@ def convert_stack_to_cutout(svg_path: str):
 ## Input/Output
 
 ### Input
+
 - **Thư mục**: `data/lineart/train/images` (hoặc custom path)
 - **Định dạng**: PNG, JPG, JPEG (không phân biệt hoa thường)
 - **Yêu cầu**: Ảnh có hoặc không có kênh alpha
 
 ### Output
+
 - **PNG đã làm sạch**: `data/lineart/train/clean/` - Ảnh đã tiền xử lý với alpha sắc lẹm (binary)
 - **File SVG**: `data/svg/logo/` - Mẫu thêu đã vector hóa
 
 ## Thách thức & Giải pháp
 
 ### Thách thức 1: Mất độ trong suốt khi qua fal.ai API
+
 **Vấn đề**: NAFNet API trả về ảnh RGB và vứt bỏ alpha channel gốc.
 
-**Giải pháp**: 
+**Giải pháp**:
+
 - Trích xuất alpha channel gốc trước khi gửi ảnh qua fal.ai
 - Sau khi nhận ảnh RGB đã deblur, dán lại alpha channel gốc vào
 - Đảm bảo transparency được giữ nguyên xuyên suốt pipeline
 
 ### Thách thức 2: Alpha Channel bị mờ gây SVG nặng
+
 **Vấn đề**: Gaussian Blur trên alpha tạo gradient (50, 100, 150) thay vì binary (0, 255). vtracer cố gắng mô phỏng gradient bằng hàng ngàn vector path, file SVG nặng hàng chục MB.
 
 **Giải pháp**:
+
 - Thay Gaussian Blur bằng `cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)`
 - Alpha giờ chỉ có giá trị 0 hoặc 255 (sắc lẹm/binary)
 - Tránh vtracer tạo quá nhiều vector path mô phỏng gradient
 
 ### Thách thức 3: Cạnh răng cưa từ ảnh gốc U-2-Net
+
 **Vấn đề**: Ảnh gốc từ U-2-Net có nhiều chỗ nhọn nhô, không mượt.
 
 **Giải pháp**:
+
 - Tích hợp fal.ai NAFNet để làm mượt và khử nhiễu ảnh trước khi vector hóa
 - Sử dụng bilateral filter trên RGB channels để giữ cạnh nhưng giảm nhiễu
 - Điều chỉnh tham số vtracer để đường cong mượt hơn
 
 ### Thách thức 4: Giảm màu (Color Quantization)
+
 **Vấn đề**: Bảng màu bị giảm gây banding và biểu diễn màu không chính xác.
 
 **Giải pháp**:
+
 - Giữ `color_precision=12` để độ chính xác màu cao
 - Giữ `layer_difference=4` để phân tách vùng màu tốt
 - Duy trì `colormode="color"` để giữ đầy đủ màu
 
 ### Thách thức 5: SVG Layers Overlap
+
 **Vấn đề**: vtracer's built-in `hierarchical="cutout"` không đủ chính xác, vẫn còn overlap giữa layers.
 
 **Giải pháp**:
+
 - Sử dụng `hierarchical="stack"` để tạo layered SVG
 - Áp dụng manual boolean operations với shapely
 - `StrictCutoutProcessor` xử lý top-to-bottom với cumulative mask
@@ -210,6 +223,7 @@ python3 png_to_svg.py
 ## Các bước tiếp theo
 
 Sau khi chuyển đổi SVG, giai đoạn tiếp theo bao gồm:
+
 - Tối ưu hóa SVG cho máy thêu
 - Đơn giản hóa đường dẫn và tạo mũi thêu
 - Chuyổi đổi định dạng sang format riêng của máy (PES, DST, v.v.)
@@ -221,6 +235,7 @@ Sau khi chuyển đổi SVG, giai đoạn tiếp theo bao gồm:
 ## Tổng quan
 
 Bước này chuyển đổi các file SVG có metadata (inkscape:label) sang ảnh PNG và label masks để huấn luyện model segmentation. Pipeline hỗ trợ:
+
 - Đọc metadata từ `inkscape:label` attribute trong SVG paths
 - Render SVG thành PNG với nền trong suốt
 - Tạo label mask dựa trên stitch type (fill/satin)
@@ -293,11 +308,13 @@ def render_svg_to_png(svg_path: str, output_path: str, width: int = None, height
 ## Input/Output
 
 ### Input
+
 - **Thư mục**: `data/svg/logo/` (hoặc custom path)
 - **Định dạng**: SVG với `inkscape:label` attribute
 - **Metadata**: `inkscape:label="fill"` hoặc `inkscape:label="satin"`
 
 ### Output
+
 - **PNG Images**: `data/logo/easy/images/` - Ảnh SVG đã render với nền trong suốt
 - **Label Masks**: `data/logo/easy/masks/` - Mask grayscale với 3 giá trị (0, 1, 2)
 
@@ -340,38 +357,120 @@ python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/ima
 
 ### Phiên bản Train
 
-**1. train.py - Dataset Line-art (2-class)**
+**1. train.py - Dataset Line-art (3-class)**
+
 - Dataset: `data/lineart/train/images`, `data/lineart/train/masks`
-- Model: `U2NET(in_ch=1, out_ch=2)`
-- Labels: 0=background, 1=fill
+- Model: `U2NET(in_ch=1, out_ch=3)`
+- Labels: 0=background, 1=fill, 2=satin
 - Checkpoint: `checkpoints/lineart/u2net_last.pth`, `checkpoints/lineart/u2net_best.pth`
+- Resolution: 768 (tăng từ 512)
+- Batch size: 2 (với Mixed Precision)
+- Metrics: torchmetrics (Macro F1, Per-class IoU)
 
 **2. train_logo.py - Dataset Logo (3-class)**
-- Dataset: `data/logo/easy/images`, `data/logo/easy/masks`
+
+- Dataset: `data/logo/train/images`, `data/logo/train/masks`
 - Model: `U2NET(in_ch=1, out_ch=3)`
 - Labels: 0=background, 1=fill, 2=satin
 - Checkpoint: `checkpoints/logo/u2net_logo_last.pth`, `checkpoints/logo/u2net_logo_best.pth`
 - Sử dụng: `dataset_logo.py`, `utils_logo.py`
+- Resolution: 768 (tăng từ 512)
+- Batch size: 2 (với Mixed Precision)
+- Metrics: torchmetrics (Macro F1, Per-class IoU)
+
+### Cải tiến Training (v7)
+
+**Loss Functions:**
+
+- **Generalized Dice Loss**: Thay thế Dice Loss với class weights [1.0, 2.0, 2.0] để ưu tiên Fill và Satin
+- **Focal Loss**: Giảm label_smoothing từ 0.1 → 0.02 để giảm over-smoothing
+- **Multi-class Boundary Loss**: Tính boundary cho cả 3 lớp thay vì chỉ binary
+
+**Deep Supervision:**
+
+- **Weighted Deep Supervision**: Trọng số khác nhau cho từng output branch [1.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.1]
+- Output chính (d0) có trọng số cao nhất, các nhánh phụ giảm dần
+
+**Metrics:**
+
+- **torchmetrics**: Sử dụng `f1_score` và `jaccard_index` cho multi-class metrics
+- **Macro F1 Score**: Đánh giá tổng thể qua 3 lớp
+- **Per-class IoU**: Theo dõi IoU riêng cho Background, Fill, Satin
+- **Mean IoU**: Trung bình IoU qua tất cả lớp
+
+**Mixed Precision Training:**
+
+- Sử dụng `torch.cuda.amp.autocast` và `GradScaler`
+- Giảm VRAM ~35-50% để train ở resolution cao hơn (768)
+- Giảm batch size từ 4 → 2 để tránh OOM
 
 ### Chạy Training
 
 ```bash
-# Train line-art (2-class)
+# Train line-art (3-class)
 python scripts/training/train.py
 
 # Train logo (3-class)
 python scripts/training/train_logo.py
 ```
 
+## Inference
+
+### predict_logo.py - Batch Inference cho Logo
+
+**File**: `scripts/inference/predict_logo.py`
+
+**Tính năng:**
+
+- Batch inference cho toàn bộ ảnh trong thư mục test
+- Đồng bộ kỹ thuật Global Context với training (LongestMaxSize + PadIfNeeded)
+- Hỗ trợ 3-class segmentation (Background=0, Fill=1, Satin=2)
+- Color coding: Fill (Green), Satin (Red)
+- Tự động crop ngược về kích thước gốc
+- Lưu mask, overlay, và visualization
+
+**Preprocessing:**
+
+- Resize ảnh với `LongestMaxSize(max_size=IMAGE_SIZE)` - giữ tỷ lệ
+- Pad với `PadIfNeeded` - thêm viền đen để về kích thước vuông
+- Chuẩn hóa `/ 255.0` trước khi đưa vào model
+
+**Postprocessing:**
+
+- Crop ngược phần viền đen
+- Resize về kích thước gốc với `INTER_NEAREST` (không làm mờ nhãn)
+- Color coding mask cho visualization
+
+**Output:**
+
+- `{filename}_mask.png` - Mask đã color code
+- `{filename}_overlay.png` - Overlay mask lên ảnh gốc
+- `{filename}_viz.png` - Visualization 3 cột (Original, Mask, Overlay)
+
+**Chạy Inference:**
+
+```bash
+python scripts/inference/predict_logo.py
+```
+
+**Cấu hình:**
+
+- `MODEL_WEIGHTS_PATH`: Đường dẫn đến checkpoint
+- `TEST_DIR`: Thư mục ảnh test
+- `OUTPUT_DIR`: Thư mục output
+- `IMAGE_SIZE`: Kích thước input (default: 512)
+
 ## Ghi chú
 
 **SVG to PNG Pipeline:**
+
 - Pipeline render từng path theo thứ tự SVG để giữ đúng layer order
 - Alpha channel được sử dụng thay vì grayscale threshold để độ chính xác cao hơn
 - Model 3-class train từ đầu, không load checkpoint từ model 2-class
 - Learning rate khuyến nghị: 1e-4 hoặc 5e-5 cho fine-tune
 
 **PNG to SVG Pipeline:**
+
 - Thời gian xử lý phụ thuộc vào độ phức tạp và kích thước ảnh
 - fal.ai NAFNet thêm khoảng 20-30s mỗi ảnh nhưng cải thiện chất lượng đáng kể
 - Alpha channel binary giúp file SVG nhẹ hơn nhiều so với gradient alpha
