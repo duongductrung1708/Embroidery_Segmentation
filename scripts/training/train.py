@@ -18,7 +18,7 @@ from src.dataset import EmbroideryDataset
 from src.model import U2NET 
 
 # Kéo toàn bộ "đồ nghề" từ hộp utils
-from src.utils import DiceLoss, FocalLoss, get_boundary_mask, calculate_metrics, seed_everything
+from src.utils import GeneralizedDiceLoss, FocalLoss, get_boundary_mask, calculate_metrics, calculate_metrics_torchmetrics, seed_everything
 
 def main():
     seed_everything(42)
@@ -26,9 +26,10 @@ def main():
     # ==========================================
     # 1. CẤU HÌNH HỆ THỐNG
     # ==========================================
-    TEMP_IMAGE_SIZE = 512
+    TEMP_IMAGE_SIZE = 768  # Tăng từ 512 lên 768 để giữ chi tiết nhỏ
     TEMP_CROPS = 20
     BATCH_SIZE = 4
+    NUM_CLASSES = 3  # Background, Fill, Satin
 
     # --- TẬP TRAIN: Cắt nhỏ & Data Augmentation Hạng nặng ---
     train_transform = A.Compose([
@@ -87,16 +88,19 @@ def main():
     # ==========================================
     wandb.init(
         project="embroidery-segmentation", 
-        name="v6-u2net-deep-supervision",         
+        name="v7-u2net-3class-improved",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
-            "dataset": "Embroidery_V2",
+            "dataset": "Embroidery_V3",
             "epochs": 50,
             "batch_size": BATCH_SIZE,
             "image_size": TEMP_IMAGE_SIZE,
-            "fill_weight": 2.5, 
-            "crops_per_image": TEMP_CROPS
+            "num_classes": NUM_CLASSES,
+            "fill_weight": 2.5,
+            "satin_weight": 2.5,
+            "crops_per_image": TEMP_CROPS,
+            "label_smoothing": 0.02
         }
     )
     config = wandb.config 
@@ -113,12 +117,17 @@ def main():
     # ==========================================
     # 4. CHUẨN BỊ BỘ NÃO U-2-NET & LOSS FUNCTION
     # ==========================================
-    model = U2NET(in_ch=1, out_ch=2).to(device)
-    class_weights = torch.tensor([1.0, config.fill_weight]).to(device)
+    model = U2NET(in_ch=1, out_ch=NUM_CLASSES).to(device)
     
-    focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.1)
-    dice_loss_fn = DiceLoss()
-    bce_boundary_fn = nn.BCEWithLogitsLoss() 
+    # Class weights cho 3 lớp: Background, Fill, Satin
+    class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
+    
+    focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.02)
+    dice_loss_fn = GeneralizedDiceLoss(num_classes=NUM_CLASSES, weights=[1.0, 2.0, 2.0])
+    bce_boundary_fn = nn.BCEWithLogitsLoss()
+    
+    # Deep supervision weights: cao hơn cho output chính (d0), giảm dần cho các nhánh phụ
+    deep_supervision_weights = [1.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.1] 
     
     LAST_CHECKPOINT_PATH = "checkpoints/lineart/u2net_last.pth"
     BEST_MODEL_PATH = "checkpoints/lineart/u2net_best.pth"
@@ -157,7 +166,8 @@ def main():
         # --- PHA TRAIN ---
         model.train()
         running_train_loss = 0.0
-        train_tp = train_fp = train_fn = train_tn = 0 
+        all_train_preds = []
+        all_train_masks = []
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
 
@@ -166,14 +176,19 @@ def main():
             optimizer.zero_grad()
             
             outputs = model(images)  # U2-Net trả về 7 bản đồ
-            boundary_targets = get_boundary_mask(masks, device)
+            boundary_targets = get_boundary_mask(masks, device, num_classes=NUM_CLASSES)
             
             loss = 0.0
-            # Deep Supervision: Cộng dồn Loss của cả 7 bản đồ
-            for d in outputs:
+            # Deep Supervision: Áp trọng số khác nhau cho từng output
+            for idx, d in enumerate(outputs):
+                weight = deep_supervision_weights[idx]
                 seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
-                boundary_loss = bce_boundary_fn(d[:, 1, :, :], boundary_targets)
-                loss += (seg_loss + 0.5 * boundary_loss)
+                # Multi-class boundary loss: tính cho tất cả các lớp
+                boundary_loss = 0.0
+                for class_idx in range(NUM_CLASSES):
+                    boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
+                boundary_loss /= NUM_CLASSES  # Average over classes
+                loss += weight * (seg_loss + 0.5 * boundary_loss)
             
             loss.backward()
             optimizer.step()
@@ -184,40 +199,49 @@ def main():
             
             with torch.no_grad():
                 preds = torch.argmax(outputs[0], dim=1) # Chỉ đánh giá độ chính xác trên d0
-                train_tp += ((preds == 1) & (masks == 1)).sum().item() 
-                train_fp += ((preds == 1) & (masks == 0)).sum().item() 
-                train_fn += ((preds == 0) & (masks == 1)).sum().item() 
-                train_tn += ((preds == 0) & (masks == 0)).sum().item() 
+                all_train_preds.append(preds.cpu())
+                all_train_masks.append(masks.cpu()) 
 
         avg_train_loss = running_train_loss / len(train_loader)
-        train_acc, train_prec, train_recall, train_f1 = calculate_metrics(train_tp, train_fp, train_fn, train_tn)
+        # Sử dụng metrics từ torchmetrics trên toàn bộ train set
+        all_train_preds = torch.cat(all_train_preds, dim=0)
+        all_train_masks = torch.cat(all_train_masks, dim=0)
+        train_metrics = calculate_metrics_torchmetrics(all_train_preds, all_train_masks, num_classes=NUM_CLASSES)
+        train_macro_f1 = train_metrics['macro_f1']
+        train_iou_bg = train_metrics['iou_background']
+        train_iou_fill = train_metrics['iou_fill']
+        train_iou_satin = train_metrics['iou_satin']
+        train_mean_iou = train_metrics['mean_iou']
 
         # --- PHA VALIDATION (CẮT NHỎ TÍNH LOSS) ---
         model.eval()
         running_val_loss = 0.0
-        val_tp = val_fp = val_fn = val_tn = 0 
+        all_val_preds = []
+        all_val_masks = []
         
         with torch.no_grad():
             for val_images, val_masks in val_loader:
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
                 val_outputs = model(val_images)
                 
-                val_boundary_targets = get_boundary_mask(val_masks, device)
+                val_boundary_targets = get_boundary_mask(val_masks, device, num_classes=NUM_CLASSES)
                 
                 val_loss = 0.0
-                for d in val_outputs:
+                for idx, d in enumerate(val_outputs):
+                    weight = deep_supervision_weights[idx]
                     v_seg_loss = focal_loss_fn(d, val_masks) + dice_loss_fn(d, val_masks)
-                    v_bound_loss = bce_boundary_fn(d[:, 1, :, :], val_boundary_targets)
-                    val_loss += (v_seg_loss + 0.5 * v_bound_loss)
+                    # Multi-class boundary loss
+                    v_boundary_loss = 0.0
+                    for class_idx in range(NUM_CLASSES):
+                        v_boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], val_boundary_targets[:, class_idx, :, :])
+                    v_boundary_loss /= NUM_CLASSES
+                    val_loss += weight * (v_seg_loss + 0.5 * v_boundary_loss)
                     
                 running_val_loss += val_loss.item()
 
                 preds = torch.argmax(val_outputs[0], dim=1)
-                
-                val_tp += ((preds == 1) & (val_masks == 1)).sum().item()
-                val_fp += ((preds == 1) & (val_masks == 0)).sum().item()
-                val_fn += ((preds == 0) & (val_masks == 1)).sum().item()
-                val_tn += ((preds == 0) & (val_masks == 0)).sum().item()
+                all_val_preds.append(preds.cpu())
+                all_val_masks.append(val_masks.cpu())
 
             # --- DỰ ĐOÁN ẢNH TOÀN CẢNH (GÓC RỘNG) CHO WANDB ---
             fixed_outputs = model(fixed_val_images)
@@ -242,38 +266,50 @@ def main():
                     masks={
                         "ground_truth": {
                             "mask_data": true_mask_np,
-                            "class_labels": {0: "Nen", 1: "Fill chuan"}
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}
                         },
                         "predictions": {
                             "mask_data": pred_mask_np,
-                            "class_labels": {0: "Nen", 1: "AI Du doan"}
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}
                         }
                     }
                 )
                 wandb_log_images.append(wandb_img)
 
         avg_val_loss = running_val_loss / len(val_loader)
-        val_acc, val_prec, val_recall, val_f1 = calculate_metrics(val_tp, val_fp, val_fn, val_tn)
+        # Sử dụng metrics từ torchmetrics trên toàn bộ val set
+        all_val_preds = torch.cat(all_val_preds, dim=0)
+        all_val_masks = torch.cat(all_val_masks, dim=0)
+        val_metrics = calculate_metrics_torchmetrics(all_val_preds, all_val_masks, num_classes=NUM_CLASSES)
+        val_macro_f1 = val_metrics['macro_f1']
+        val_iou_bg = val_metrics['iou_background']
+        val_iou_fill = val_metrics['iou_fill']
+        val_iou_satin = val_metrics['iou_satin']
+        val_mean_iou = val_metrics['mean_iou']
 
         scheduler.step(avg_val_loss)
 
-        print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET:")
-        print(f"   Train | Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | Precision: {train_prec:.4f} | Recall: {train_recall:.4f} | F1: {train_f1:.4f}")
-        print(f"   Val   | Loss: {avg_val_loss:.4f} | Acc: {val_acc:.4f} | Precision: {val_prec:.4f} | Recall: {val_recall:.4f} | F1: {val_f1:.4f}\n")
+        print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET (3-class):")
+        print(f"   Train | Loss: {avg_train_loss:.4f} | Macro F1: {train_macro_f1:.4f} | Mean IoU: {train_mean_iou:.4f}")
+        print(f"          IoU - BG: {train_iou_bg:.4f} | Fill: {train_iou_fill:.4f} | Satin: {train_iou_satin:.4f}")
+        print(f"   Val   | Loss: {avg_val_loss:.4f} | Macro F1: {val_macro_f1:.4f} | Mean IoU: {val_mean_iou:.4f}")
+        print(f"          IoU - BG: {val_iou_bg:.4f} | Fill: {val_iou_fill:.4f} | Satin: {val_iou_satin:.4f}\n")
 
         wandb.log({
             "epoch": epoch + 1, 
             "learning_rate": current_lr,
             "Loss/Train": avg_train_loss, 
             "Loss/Val": avg_val_loss,
-            "Accuracy/Train": train_acc,
-            "Accuracy/Val": val_acc,
-            "Precision/Train": train_prec,
-            "Precision/Val": val_prec,
-            "Recall/Train": train_recall,
-            "Recall/Val": val_recall,
-            "F1_Score/Train": train_f1, 
-            "F1_Score/Val": val_f1,
+            "F1_Macro/Train": train_macro_f1,
+            "F1_Macro/Val": val_macro_f1,
+            "IoU_Mean/Train": train_mean_iou,
+            "IoU_Mean/Val": val_mean_iou,
+            "IoU_Background/Train": train_iou_bg,
+            "IoU_Background/Val": val_iou_bg,
+            "IoU_Fill/Train": train_iou_fill,
+            "IoU_Fill/Val": val_iou_fill,
+            "IoU_Satin/Train": train_iou_satin,
+            "IoU_Satin/Val": val_iou_satin,
             "Validation_Images": wandb_log_images
         })
 
@@ -285,15 +321,15 @@ def main():
         }
         torch.save(checkpoint_last, LAST_CHECKPOINT_PATH)
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        if val_macro_f1 > best_val_f1:
+            best_val_f1 = val_macro_f1
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            print(f"Da luu ky luc moi (Best Val F1: {best_val_f1:.4f})")
+            print(f"Da luu ky luc moi (Best Val Macro F1: {best_val_f1:.4f})")
             wandb.save(BEST_MODEL_PATH)
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
-            print(f"Validation F1 khong tang. Canh bao: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
+            print(f"Validation Macro F1 khong tang. Canh bao: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
 
         if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
             print(f"\nMO HINH DA HOI TU TAI EPOCH {epoch + 1}! Da kich hoat Dung Som de tiet kiem thoi gian.")

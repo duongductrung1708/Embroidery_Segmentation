@@ -39,9 +39,16 @@ class EmbroideryDataset(Dataset):
             # Mask bắt buộc dùng INTER_NEAREST để viền không bị mờ nhòe (0 hoặc 255)
             mask_gray = cv2.resize(mask_gray, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-        # Ép nhãn Mask về 0 và 1
-        _, mask_binary = cv2.threshold(mask_gray, 127, 255, cv2.THRESH_BINARY)
-        mask_binary = (mask_binary > 0).astype(np.float32)
+        # Ép nhãn Mask về 3 lớp: Background (0), Fill (1), Satin (2)
+        # Giữ nguyên giá trị gốc từ mask (nếu đã có 3 lớp)
+        # Nếu mask chỉ có 2 lớp (0 và 255), chuyển về 0 và 1
+        unique_vals = np.unique(mask_gray)
+        if len(unique_vals) == 2 and 255 in unique_vals:
+            # Binary mask: chuyển 255 -> 1
+            mask_binary = (mask_gray > 127).astype(np.float32)
+        else:
+            # Multi-class mask: giữ nguyên giá trị (0, 1, 2)
+            mask_binary = mask_gray.astype(np.float32)
 
         # Trích xuất kênh Alpha (Nét vẽ gốc) làm Input cho AI
         alpha_channel = img_rgba[:, :, 3].astype(np.float32)
