@@ -80,8 +80,8 @@ def main():
             min_height=TEMP_IMAGE_SIZE, 
             min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, 
-            value=0, 
-            mask_value=0
+            fill=0, 
+            fill_value=0
         ),
         ToTensorV2()
     ])
