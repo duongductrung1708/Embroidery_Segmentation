@@ -93,9 +93,9 @@ def main():
     # ==========================================
     # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
     # ==========================================
-    train_dataset = EmbroideryDatasetLogo(image_dir="data/logo/train/images", mask_dir="data/logo/train/masks", transform=train_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
-    val_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
-    tracking_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=tracking_transform, resize_factor=0.5, crops_per_image=1)
+    train_dataset = EmbroideryDatasetLogo(image_dir="data/logo/train/images", mask_dir="data/logo/train/masks", transform=train_transform, crops_per_image=TEMP_CROPS)
+    val_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=val_transform, crops_per_image=TEMP_CROPS)
+    tracking_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=tracking_transform, crops_per_image=1)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
