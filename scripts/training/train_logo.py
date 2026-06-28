@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 import wandb
 import os
@@ -205,7 +205,7 @@ def main():
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
             
-            with autocast():
+            with torch.autocast(device_type=device.type):
                 outputs = model(images)  
                 boundary_targets = get_boundary_mask(masks, device, num_classes=NUM_CLASSES)
                 
