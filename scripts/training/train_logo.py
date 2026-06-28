@@ -44,7 +44,7 @@ def main():
             min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, 
             fill=0, 
-            fill_value=0
+            fill_mask=0
         ),
         
         # Các phép biến đổi hình học (Rất cần thiết để AI học hình dáng đa dạng)
@@ -81,7 +81,7 @@ def main():
             min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, 
             fill=0, 
-            fill_value=0
+            fill_mask=0
         ),
         ToTensorV2()
     ])
@@ -94,7 +94,7 @@ def main():
             min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, 
             fill=0, 
-            fill_value=0
+            fill_mask=0
         ),
         ToTensorV2()
     ])
