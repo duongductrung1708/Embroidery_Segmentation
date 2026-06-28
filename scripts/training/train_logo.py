@@ -13,9 +13,9 @@ from pathlib import Path
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# Xác định đường dẫn gốc của dự án (Lùi 2 cấp từ file hiện tại: train_logo.py -> training -> scripts -> Embroidery_Segmentation)
+# Xác định đường dẫn gốc của dự án
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT)) # Dùng insert(0) để ưu tiên tìm trong thư mục dự án trước
+sys.path.insert(0, str(PROJECT_ROOT)) 
 
 from src.dataset_logo import EmbroideryDatasetLogo
 from src.model import U2NET 
@@ -30,32 +30,61 @@ def main():
     # 1. CẤU HÌNH HỆ THỐNG
     # ==========================================
     TEMP_IMAGE_SIZE = 512
-    TEMP_CROPS = 20
+    TEMP_CROPS = 1  # QUAN TRỌNG: Chỉ cần 1 vì giờ ta nạp nguyên ảnh toàn cảnh
     BATCH_SIZE = 4
 
-    # --- TẬP TRAIN: Cắt nhỏ & Data Augmentation Hạng nặng ---
+    # --- TẬP TRAIN: THU NHỎ & CHÈN VIỀN TOÀN CẢNH ---
     train_transform = A.Compose([
-        A.OneOf([
-            A.CropNonEmptyMaskIfExists(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE, p=0.8),
-            A.RandomCrop(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE, p=0.2),
-        ], p=1.0),
+        # Bắt buộc: Ép logo về 512x512 mà không làm méo tỷ lệ
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.PadIfNeeded(
+            min_height=TEMP_IMAGE_SIZE, 
+            min_width=TEMP_IMAGE_SIZE, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            value=0, 
+            mask_value=0
+        ),
+        
+        # Các phép biến đổi hình học (Rất cần thiết để AI học hình dáng đa dạng)
         A.HorizontalFlip(p=0.5), 
         A.VerticalFlip(p=0.5),   
-        A.Affine(translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)}, scale=(0.85, 1.15), rotate=(-180, 180), interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.7),
-        A.ElasticTransform(alpha=1, sigma=50, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.3),
-        A.CLAHE(p=0.5), 
-        A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=0.5), 
-        A.CoarseDropout(num_holes_range=(2, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), fill=0, fill_mask=0, p=0.3),
+        A.Affine(
+            translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)}, 
+            scale=(0.85, 1.15), 
+            rotate=(-180, 180), 
+            interpolation=cv2.INTER_NEAREST, # Bắt buộc NEAREST để giữ nguyên nhãn 0,1,2
+            border_mode=cv2.BORDER_CONSTANT, 
+            fill=0, 
+            fill_mask=0, 
+            p=0.7
+        ),
+        A.ElasticTransform(
+            alpha=1, 
+            sigma=50, 
+            interpolation=cv2.INTER_NEAREST, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            fill=0, 
+            fill_mask=0, 
+            p=0.3
+        ),
+        
         ToTensorV2()             
     ])
 
-    # --- TẬP VAL: Cắt nhỏ để tính Loss cho nhẹ VRAM ---
+    # --- TẬP VAL: ĐỒNG BỘ VỚI TẬP TRAIN ---
     val_transform = A.Compose([
-        A.CropNonEmptyMaskIfExists(width=TEMP_IMAGE_SIZE, height=TEMP_IMAGE_SIZE),
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.PadIfNeeded(
+            min_height=TEMP_IMAGE_SIZE, 
+            min_width=TEMP_IMAGE_SIZE, 
+            border_mode=cv2.BORDER_CONSTANT, 
+            value=0, 
+            mask_value=0
+        ),
         ToTensorV2()
     ])
 
-    # --- TẬP TRACKING: Kính lúp Góc Rộng (Tuyệt đối không cắt) ---
+    # --- TẬP TRACKING: Vẫn giữ nguyên ---
     tracking_transform = A.Compose([
         A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
         A.PadIfNeeded(
@@ -72,25 +101,22 @@ def main():
     # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
     # ==========================================
     train_dataset = EmbroideryDatasetLogo(image_dir="data/logo/train/images", mask_dir="data/logo/train/masks", transform=train_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
-    val_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=max(1, TEMP_CROPS // 2))
+    val_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=val_transform, resize_factor=0.5, crops_per_image=TEMP_CROPS)
     tracking_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=tracking_transform, resize_factor=0.5, crops_per_image=1)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
     tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    num_train_images = len(train_dataset) // TEMP_CROPS 
-    num_val_images = len(val_dataset) // max(1, TEMP_CROPS // 2)
-
-    print(f"Number of training images: {num_train_images}")
-    print(f"Number of validation images: {num_val_images}")
+    print(f"Number of training images (Full Scale): {len(train_dataset)}")
+    print(f"Number of validation images (Full Scale): {len(val_dataset)}")
 
     # ==========================================
     # 3. KHỞI TẠO WANDB & THIẾT BỊ
     # ==========================================
     wandb.init(
         project="embroidery-segmentation", 
-        name="logo-3class-u2net-deep-supervision",         
+        name="logo-3class-global-context",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
@@ -108,7 +134,6 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"Dang su dung thiet bi tinh toan: {device}")
 
-    # --- Trích xuất 1 Lô Ảnh Toàn Cảnh (Góc rộng) cố định ---
     print("Dang trich xuat tap mau Toan Canh de log len WandB...")
     fixed_val_batch = next(iter(tracking_loader))
     fixed_val_images = fixed_val_batch[0].to(device)
@@ -127,9 +152,7 @@ def main():
     LAST_CHECKPOINT_PATH = "checkpoints/logo/u2net_logo_last.pth"
     BEST_MODEL_PATH = "checkpoints/logo/u2net_logo_best.pth"
 
-    # ---- DÒNG CẦN THÊM VÀO LÀ ĐÂY ----
     os.makedirs(os.path.dirname(LAST_CHECKPOINT_PATH), exist_ok=True)
-    # ----------------------------------
     
     start_epoch = 0
     best_val_f1 = 0.0
@@ -159,7 +182,7 @@ def main():
     # ==========================================
     # 5. VÒNG LẶP HUẤN LUYỆN
     # ==========================================
-    print("\nBAT DAU HUAN LUYEN LOGO 3-CLASS (U2-NET DEEP SUPERVISION)...")
+    print("\nBAT DAU HUAN LUYEN LOGO 3-CLASS (GLOBAL CONTEXT)...")
     for epoch in range(start_epoch, config.epochs):
         
         # --- PHA TRAIN ---
@@ -173,11 +196,11 @@ def main():
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
             
-            outputs = model(images)  # U2-Net trả về 7 bản đồ
+            outputs = model(images)  
             boundary_targets = get_boundary_mask(masks, device)
             
             loss = 0.0
-            # Deep Supervision: Cộng dồn Loss của cả 7 bản đồ
+            # Deep Supervision
             for d in outputs:
                 seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
                 boundary_loss = bce_boundary_fn(d[:, 1, :, :], boundary_targets)
@@ -191,8 +214,7 @@ def main():
             loop.set_postfix(loss=loss.item(), lr=current_lr)
             
             with torch.no_grad():
-                preds = torch.argmax(outputs[0], dim=1) # Chỉ đánh giá độ chính xác trên d0
-                # Multi-class metrics
+                preds = torch.argmax(outputs[0], dim=1) 
                 for cls in range(3):
                     train_tp += ((preds == cls) & (masks == cls)).sum().item()
                     train_fp += ((preds == cls) & (masks != cls)).sum().item()
@@ -202,7 +224,7 @@ def main():
         avg_train_loss = running_train_loss / len(train_loader)
         train_acc, train_prec, train_recall, train_f1 = calculate_metrics(train_tp, train_fp, train_fn, train_tn)
 
-        # --- PHA VALIDATION (CẮT NHỎ TÍNH LOSS) ---
+        # --- PHA VALIDATION ---
         model.eval()
         running_val_loss = 0.0
         val_tp = val_fp = val_fn = val_tn = 0 
@@ -223,15 +245,13 @@ def main():
                 running_val_loss += val_loss.item()
 
                 preds = torch.argmax(val_outputs[0], dim=1)
-                
-                # Multi-class metrics
                 for cls in range(3):
                     val_tp += ((preds == cls) & (val_masks == cls)).sum().item()
                     val_fp += ((preds == cls) & (val_masks != cls)).sum().item()
                     val_fn += ((preds != cls) & (val_masks == cls)).sum().item()
                     val_tn += ((preds != cls) & (val_masks != cls)).sum().item()
 
-            # --- DỰ ĐOÁN ẢNH TOÀN CẢNH (GÓC RỘNG) CHO WANDB ---
+            # --- DỰ ĐOÁN ẢNH TOÀN CẢNH CHO WANDB ---
             fixed_outputs = model(fixed_val_images)
             fixed_preds = torch.argmax(fixed_outputs[0], dim=1)
 
