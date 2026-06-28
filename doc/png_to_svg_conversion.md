@@ -378,18 +378,42 @@ python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/ima
 - Batch size: 2 (với Mixed Precision)
 - Metrics: torchmetrics (Macro F1, Per-class IoU)
 
-### Cải tiến Training (v7)
+### Cải tiến Training (v8)
 
 **Loss Functions:**
 
-- **Generalized Dice Loss**: Thay thế Dice Loss với class weights [1.0, 2.0, 2.0] để ưu tiên Fill và Satin
+- **Generalized Dice Loss**: Frequency-based weights tính theo tần suất pixel của từng batch (tự động thích ứng với imbalance)
 - **Focal Loss**: Giảm label_smoothing từ 0.1 → 0.02 để giảm over-smoothing
-- **Multi-class Boundary Loss**: Tính boundary cho cả 3 lớp thay vì chỉ binary
+- **Multi-class Boundary Loss**: Tính boundary cho cả 3 lớp, chỉ áp dụng cho output chính (d0)
+- **Boundary Dilation**: Dilate boundary mask (kernel 3x3) trước khi tính BCE boundary loss
 
 **Deep Supervision:**
 
 - **Weighted Deep Supervision**: Trọng số khác nhau cho từng output branch [1.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.1]
 - Output chính (d0) có trọng số cao nhất, các nhánh phụ giảm dần
+- **Boundary Loss**: Chỉ áp dụng cho d0, không áp dụng cho 7 side outputs
+
+**Class Weights:**
+
+- **Focal Loss Weights**: [1.0, 3.0, 8.0] cho Background, Fill, Satin
+- Ưu tiên nhiều hơn cho lớp Satin (thường ít nhất trong dataset)
+
+**Data Preprocessing:**
+
+- **Resize**: Chỉ resize một lần trong Albumentations (LongestMaxSize + PadIfNeeded)
+- Bỏ `resize_factor` parameter từ dataset
+- Giữ nguyên chi tiết Satin tốt hơn
+
+**Augmentations:**
+
+- Bỏ ElasticTransform (logo không nên bị biến dạng hình học)
+- Giữ HorizontalFlip, VerticalFlip, Affine
+
+**Optimizer:**
+
+- **AdamW**: Thay Adam bằng AdamW với weight_decay=1e-4
+- **CosineAnnealingWarmRestarts**: T_0=10, T_mult=2, eta_min=1e-6
+- Thay thế ReduceLROnPlateau
 
 **Metrics:**
 
@@ -425,7 +449,7 @@ python scripts/training/train_logo.py
 - Batch inference cho toàn bộ ảnh trong thư mục test
 - Đồng bộ kỹ thuật Global Context với training (LongestMaxSize + PadIfNeeded)
 - Hỗ trợ 3-class segmentation (Background=0, Fill=1, Satin=2)
-- Color coding: Fill (Green), Satin (Red)
+- Color coding: Fill (Cyan), Satin (Magenta)
 - Tự động crop ngược về kích thước gốc
 - Lưu mask, overlay, và visualization
 
@@ -460,6 +484,50 @@ python scripts/inference/predict_logo.py
 - `OUTPUT_DIR`: Thư mục output
 - `IMAGE_SIZE`: Kích thước input (default: 512)
 
+### predict_single_logo.py - Single Image Inference cho Logo
+
+**File**: `scripts/inference/predict_single_logo.py`
+
+**Tính năng:**
+
+- Inference cho một ảnh đơn lẻ
+- Đồng bộ kỹ thuật Global Context với training (LongestMaxSize + PadIfNeeded)
+- Hỗ trợ 3-class segmentation (Background=0, Fill=1, Satin=2)
+- Color coding: Fill (Cyan), Satin (Magenta)
+- Tự động crop ngược về kích thước gốc
+- Hiển thị visualization với matplotlib
+
+**Preprocessing:**
+
+- Resize ảnh với LongestMaxSize - giữ tỷ lệ
+- Pad với viền đen để về kích thước vuông
+- Chuẩn hóa `/ 255.0` trước khi đưa vào model
+
+**Postprocessing:**
+
+- Crop ngược phần viền đen
+- Resize về kích thước gốc với `INTER_NEAREST`
+- Color coding mask cho visualization
+
+**Output:**
+
+- `overlay_{filename}.png` - Overlay mask lên ảnh gốc
+- `mask_{filename}.png` - Mask đã color code
+- Matplotlib visualization: Original, Mask, Overlay
+
+**Chạy Inference:**
+
+```bash
+python scripts/inference/predict_single_logo.py
+```
+
+**Cấu hình:**
+
+- `SINGLE_IMAGE_PATH`: Đường dẫn đến ảnh test
+- `OUTPUT_DIR`: Thư mục output
+- `IMAGE_SIZE`: Kích thước input (default: 512)
+- `MODEL_PATH`: Đường dẫn đến checkpoint
+
 ## Ghi chú
 
 **SVG to PNG Pipeline:**
@@ -477,3 +545,15 @@ python scripts/inference/predict_logo.py
 - Nếu fal.ai không phản hồi, pipeline tự động fallback về ảnh gốc
 - Manual boolean cutout đảm bảo zero overlap giữa layers cho laser cutting/embroidery
 - Pipeline tự động xử lý từ dirty_png → clean_png → svg với cutout
+
+**Training v8 Improvements:**
+
+- train_logo.py sử dụng 3-class segmentation
+- Mixed Precision training giúp giảm VRAM để train ở resolution cao hơn
+- Frequency-based Generalized Dice Loss tự động thích ứng với class imbalance
+- Boundary loss chỉ áp dụng cho output chính (d0) để giảm tính toán
+- Class weights tăng lên [1.0, 3.0, 8.0] để ưu tiên lớp Satin
+- AdamW + CosineAnnealingWarmRestarts optimizer cho training ổn định hơn
+- Bỏ ElasticTransform để tránh biến dạng hình học logo
+- torchmetrics cung cấp metrics chính xác và dễ theo dõi
+- Weighted deep supervision giúp model học từ nhiều scale khác nhau
