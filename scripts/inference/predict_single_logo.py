@@ -96,10 +96,10 @@ def process_image(img_path):
     # Phóng to ảnh dự đoán về lại đúng số pixel nguyên bản của Logo
     final_mask = cv2.resize(crop_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
-    # Đổ màu chuẩn: Lớp 1 (Fill) -> Xanh lá | Lớp 2 (Satin) -> Đỏ
+    # Đổ màu chuẩn: Lớp 1 (Fill) -> Cyan | Lớp 2 (Satin) -> Magenta
     color_mask = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-    color_mask[final_mask == 1] = [0, 255, 0]   # BGR của OpenCV
-    color_mask[final_mask == 2] = [0, 0, 255]   
+    color_mask[final_mask == 1] = [255, 255, 0]   # BGR của OpenCV: Cyan
+    color_mask[final_mask == 2] = [255, 0, 255]   # BGR của OpenCV: Magenta   
     
     # Tạo Overlay trộn 60% ảnh gốc, 40% Mask màu
     overlay_img = cv2.addWeighted(img_bgr, 0.6, color_mask, 0.4, 0)
@@ -141,7 +141,7 @@ def single_image_inference(img_path, save_output=True):
     
     plt.subplot(1, 3, 2)
     plt.imshow(cv2.cvtColor(color_mask, cv2.COLOR_BGR2RGB))
-    plt.title("AI Mask (Xanh=Fill, Do=Satin)")
+    plt.title("AI Mask (Cyan=Fill, Magenta=Satin)")
     plt.axis('off')
     
     plt.subplot(1, 3, 3)

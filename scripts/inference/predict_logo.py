@@ -51,11 +51,11 @@ def load_testing_model(weights_path, device):
     return model
 
 def color_code_mask(mask_argmax):
-    """0: Nền (Đen), 1: Fill (Xanh lá), 2: Satin (Đỏ)"""
+    """0: Nền (Đen), 1: Fill (Cyan), 2: Satin (Magenta)"""
     h, w = mask_argmax.shape
     color_mask = np.zeros((h, w, 3), dtype=np.uint8)
-    color_mask[mask_argmax == 1] = [0, 255, 0]   # Fill -> Green
-    color_mask[mask_argmax == 2] = [0, 0, 255]   # Satin -> Red
+    color_mask[mask_argmax == 1] = [0, 255, 255]   # Fill -> Cyan
+    color_mask[mask_argmax == 2] = [255, 0, 255]   # Satin -> Magenta
     return color_mask
 
 def main():

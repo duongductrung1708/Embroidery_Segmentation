@@ -298,11 +298,21 @@ def main():
                     masks={
                         "ground_truth": {
                             "mask_data": true_mask_np,
-                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"},
+                            "classes": [
+                                {"name": "Background", "color": "#000000"},
+                                {"name": "Fill", "color": "#00FFFF"},  # Cyan
+                                {"name": "Satin", "color": "#FF00FF"}  # Magenta
+                            ]
                         },
                         "predictions": {
                             "mask_data": pred_mask_np,
-                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"},
+                            "classes": [
+                                {"name": "Background", "color": "#000000"},
+                                {"name": "Fill", "color": "#00FFFF"},  # Cyan
+                                {"name": "Satin", "color": "#FF00FF"}  # Magenta
+                            ]
                         }
                     }
                 )
