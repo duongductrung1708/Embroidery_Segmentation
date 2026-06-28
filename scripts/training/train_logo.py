@@ -60,15 +60,6 @@ def main():
             fill_mask=0, 
             p=0.7
         ),
-        A.ElasticTransform(
-            alpha=1, 
-            sigma=50, 
-            interpolation=cv2.INTER_NEAREST, 
-            border_mode=cv2.BORDER_CONSTANT, 
-            fill=0, 
-            fill_mask=0, 
-            p=0.3
-        ),
         
         ToTensorV2()             
     ])
@@ -127,8 +118,8 @@ def main():
             "batch_size": BATCH_SIZE,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
-            "fill_weight": 2, 
-            "satin_weight": 4,
+            "fill_weight": 3, 
+            "satin_weight": 8,
             "crops_per_image": TEMP_CROPS,
             "label_smoothing": 0.02
         }
@@ -150,7 +141,7 @@ def main():
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
     
     focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.02)
-    dice_loss_fn = GeneralizedDiceLoss(num_classes=NUM_CLASSES, weights=[1.0, 2.0, 2.0])
+    dice_loss_fn = GeneralizedDiceLoss(num_classes=NUM_CLASSES)
     bce_boundary_fn = nn.BCEWithLogitsLoss()
     
     # Deep supervision weights: cao hơn cho output chính (d0), giảm dần cho các nhánh phụ
@@ -165,8 +156,9 @@ def main():
     best_val_f1 = 0.0
     active_lr = config.learning_rate
 
-    optimizer = optim.Adam(model.parameters(), lr=active_lr)
+    optimizer = optim.AdamW(model.parameters(), lr=active_lr, weight_decay=1e-4)
     scaler = GradScaler(device.type)  # Mixed Precision training
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
     if os.path.exists(LAST_CHECKPOINT_PATH):
         try:
@@ -183,7 +175,6 @@ def main():
     else:
         print("\n[TRAIN MOI] Bat dau huan luyen U2-Net cho Logo 3-class...")
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
     EARLY_STOPPING_PATIENCE = 12
     epochs_no_improve = 0
 
@@ -214,12 +205,14 @@ def main():
                 for idx, d in enumerate(outputs):
                     weight = deep_supervision_weights[idx]
                     seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
-                    # Multi-class boundary loss: tính cho tất cả các lớp
-                    boundary_loss = 0.0
-                    for class_idx in range(NUM_CLASSES):
-                        boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
-                    boundary_loss /= NUM_CLASSES  # Average over classes
-                    loss += weight * (seg_loss + 0.5 * boundary_loss)
+                    loss += weight * seg_loss
+                
+                # Boundary loss chỉ áp dụng cho output chính (d0)
+                boundary_loss = 0.0
+                for class_idx in range(NUM_CLASSES):
+                    boundary_loss += bce_boundary_fn(outputs[0][:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
+                boundary_loss /= NUM_CLASSES  # Average over classes
+                loss += 0.5 * boundary_loss
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -262,12 +255,14 @@ def main():
                 for idx, d in enumerate(val_outputs):
                     weight = deep_supervision_weights[idx]
                     v_seg_loss = focal_loss_fn(d, val_masks) + dice_loss_fn(d, val_masks)
-                    # Multi-class boundary loss
-                    v_boundary_loss = 0.0
-                    for class_idx in range(NUM_CLASSES):
-                        v_boundary_loss += bce_boundary_fn(d[:, class_idx, :, :], val_boundary_targets[:, class_idx, :, :])
-                    v_boundary_loss /= NUM_CLASSES
-                    val_loss += weight * (v_seg_loss + 0.5 * v_boundary_loss)
+                    val_loss += weight * v_seg_loss
+                
+                # Boundary loss chỉ áp dụng cho output chính (d0)
+                v_boundary_loss = 0.0
+                for class_idx in range(NUM_CLASSES):
+                    v_boundary_loss += bce_boundary_fn(val_outputs[0][:, class_idx, :, :], val_boundary_targets[:, class_idx, :, :])
+                v_boundary_loss /= NUM_CLASSES
+                val_loss += 0.5 * v_boundary_loss
                     
                 running_val_loss += val_loss.item()
 
@@ -329,7 +324,7 @@ def main():
         val_iou_satin = val_metrics['iou_satin']
         val_mean_iou = val_metrics['mean_iou']
 
-        scheduler.step(avg_val_loss)
+        scheduler.step()
 
         print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET (Logo 3-class):")
         print(f"   Train | Loss: {avg_train_loss:.4f} | Macro F1: {train_macro_f1:.4f} | Mean IoU: {train_mean_iou:.4f}")

@@ -78,17 +78,11 @@ def calculate_metrics_torchmetrics(preds, targets, num_classes=3):
 # 3. CÁC HÀM LOSS NÂNG CAO (TRỊ TRÀN VIỀN & MŨI MẮT)
 # ==========================================
 class GeneralizedDiceLoss(nn.Module):
-    """Generalized Dice Loss với trọng số cho từng lớp (hỗ trợ multi-class)"""
-    def __init__(self, num_classes=3, smooth=1e-5, weights=None):
+    """Generalized Dice Loss với trọng số tính theo tần suất pixel của từng batch"""
+    def __init__(self, num_classes=3, smooth=1e-5):
         super(GeneralizedDiceLoss, self).__init__()
         self.num_classes = num_classes
         self.smooth = smooth
-        
-        if weights is None:
-            # Mặc định: trọng số cao hơn cho các lớp thiểu số (Fill, Satin)
-            self.weights = torch.tensor([1.0, 2.0, 2.0]) if num_classes == 3 else torch.tensor([1.0, 2.0])
-        else:
-            self.weights = torch.tensor(weights)
     
     def forward(self, inputs, targets):
         """
@@ -101,8 +95,20 @@ class GeneralizedDiceLoss(nn.Module):
         # Convert targets to one-hot encoding
         targets_one_hot = F.one_hot(targets, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
         
+        # Calculate class frequencies in the batch
+        # Sum over spatial dimensions and batch
+        class_counts = targets_one_hot.sum(dim=(0, 2, 3))  # [num_classes]
+        
+        # Calculate weights inversely proportional to frequency
+        # w = 1 / (class_count + epsilon) to avoid division by zero
+        epsilon = 1e-6
+        weights = 1.0 / (class_counts + epsilon)
+        
+        # Normalize weights so they sum to num_classes (optional, keeps scale reasonable)
+        weights = weights * self.num_classes / weights.sum()
+        
         # Apply weights
-        weights = self.weights.to(inputs.device)
+        weights = weights.to(inputs.device)
         weights = weights.view(1, self.num_classes, 1, 1)
         
         # Calculate weighted intersection and union
@@ -154,6 +160,11 @@ def get_boundary_mask(masks, device, num_classes=3):
             # Chuyển sang (0, 255) cho Canny
             mask_255 = (class_mask * 255).astype(np.uint8)
             edges = cv2.Canny(mask_255, 100, 200)
-            boundaries[i, class_idx] = (edges > 0).astype(np.float32)
+            
+            # Dilate boundary để làm dày đường biên
+            kernel = np.ones((3, 3), np.uint8)
+            edges_dilated = cv2.dilate(edges, kernel, iterations=1)
+            
+            boundaries[i, class_idx] = (edges_dilated > 0).astype(np.float32)
     
     return torch.from_numpy(boundaries).to(device)
