@@ -686,7 +686,7 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
 
 if __name__ == "__main__":
     # Hardcoded input - can be filename (looks in dirty_png) or full path
-    INPUT_PATH = "36.png"  # Will look in data/svg/dirty_png/1.png
+    INPUT_PATH = "40.png"  # Will look in data/svg/dirty_png/1.png
     OUTPUT_PATH = None  # Auto-generate as filename.svg in svg folder
     USE_FAL = True  # Set to False to skip fal.ai enhancement
     
