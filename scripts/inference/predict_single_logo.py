@@ -22,7 +22,7 @@ IMAGE_SIZE = 512
 MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth"  # File trọng số Logo của bạn
 
 # ---> Cấu hình đường dẫn cho 1 ẢNH DUY NHẤT ở đây <---
-SINGLE_IMAGE_PATH = "./data/test/logo/test2_logo.png" # SỬA TÊN FILE CỦA BẠN TẠI ĐÂY
+SINGLE_IMAGE_PATH = "./data/test/logo/test1_logo.png" # SỬA TÊN FILE CỦA BẠN TẠI ĐÂY
 OUTPUT_DIR = "./data/test/logo/predictions/"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -52,18 +52,27 @@ def process_image(img_path):
     # ==========================================
     # BƯỚC 1: ĐỌC ẢNH VÀ CHUẨN BỊ CANVAS
     # ==========================================
-    img_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
-    if img_bgr is None:
+    img_rgba = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+    if img_rgba is None:
         raise ValueError(f"Không thể đọc ảnh: {img_path}")
-        
-    orig_h, orig_w = img_bgr.shape[:2]
-    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    orig_h, orig_w = img_rgba.shape[:2]
+
+    # Nếu ảnh có alpha thì lấy alpha giống lúc train
+    if img_rgba.shape[2] == 4:
+        input_image = img_rgba[:, :, 3]
+    else:
+        # fallback nếu ảnh không có alpha
+        input_image = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2GRAY)
+
+    # chỉ dùng để hiển thị
+    img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
     
     # Tính toán tỷ lệ để thu gọn cạnh dài nhất về 512
     scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
     new_h, new_w = int(orig_h * scale), int(orig_w * scale)
     
-    resized_gray = cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    resized_gray = cv2.resize(input_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
     # Bọc thêm viền đen (Padding) để ảnh đạt đúng khung 512x512
     pad_top = (IMAGE_SIZE - new_h) // 2
