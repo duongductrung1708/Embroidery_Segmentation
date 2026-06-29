@@ -32,7 +32,7 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768  # Tăng từ 512 lên 768 để giữ chi tiết nhỏ
     TEMP_CROPS = 1  # QUAN TRỌNG: Chỉ cần 1 vì giờ ta nạp nguyên ảnh toàn cảnh
-    BATCH_SIZE = 2  # Giảm từ 4 xuống 2 để tránh OOM với resolution 768
+    BATCH_SIZE = 1  # Giảm từ 4 xuống 2 để tránh OOM với resolution 768
     NUM_CLASSES = 3  # Background, Fill, Satin
 
     # --- TẬP TRAIN: THU NHỎ & CHÈN VIỀN TOÀN CẢNH ---
@@ -97,8 +97,8 @@ def main():
     val_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE)
     tracking_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, persistent_workers=True) 
     tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
