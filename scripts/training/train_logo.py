@@ -193,6 +193,8 @@ def main():
         all_train_preds = []
         all_train_masks = []
         train_rgb_samples = []  # Store RGB samples for visualization
+        train_mask_samples = []  # Store mask samples for visualization
+        train_pred_samples = []  # Store prediction samples for visualization
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
 
@@ -200,9 +202,10 @@ def main():
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
             
-            # Store first batch RGB images for visualization
+            # Store first batch RGB images and masks for visualization
             if batch_idx == 0:
                 train_rgb_samples = rgb_images[:min(4, rgb_images.size(0))]
+                train_mask_samples = masks[:min(4, masks.size(0))]
             
             with torch.autocast(device_type=device.type):
                 outputs = model(images)  
@@ -231,9 +234,13 @@ def main():
             loop.set_postfix(loss=loss.item(), lr=current_lr)
             
             with torch.no_grad():
-                preds = torch.argmax(outputs[0], dim=1) 
+                preds = torch.argmax(outputs[0], dim=1)
                 all_train_preds.append(preds.cpu())
                 all_train_masks.append(masks.cpu())
+                
+                # Store predictions from first batch for visualization
+                if batch_idx == 0:
+                    train_pred_samples = preds[:min(4, preds.size(0))]
 
         avg_train_loss = running_train_loss / len(train_loader)
         # Sử dụng metrics từ torchmetrics trên toàn bộ train set
@@ -246,14 +253,37 @@ def main():
         train_iou_satin = train_metrics['iou_satin']
         train_mean_iou = train_metrics['mean_iou']
         
-        # Log training RGB samples to wandb
-        if len(train_rgb_samples) > 0:
+        # Log training RGB samples with masks to wandb
+        if len(train_rgb_samples) > 0 and len(train_pred_samples) > 0:
             train_wandb_images = []
             for i in range(min(4, len(train_rgb_samples))):
                 rgb_np = train_rgb_samples[i].numpy()
+                true_mask_np = train_mask_samples[i].cpu().numpy().astype(np.uint8)
+                pred_mask_np = train_pred_samples[i].cpu().numpy().astype(np.uint8)
+                
                 train_wandb_images.append(wandb.Image(
                     rgb_np,
-                    caption=f"Train Input #{i+1} (Epoch {epoch+1})"
+                    caption=f"Train Input #{i+1} (Epoch {epoch+1})",
+                    masks={
+                        "ground_truth": {
+                            "mask_data": true_mask_np,
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"},
+                            "classes": [
+                                {"name": "Background", "color": "#000000"},
+                                {"name": "Fill", "color": "#00FFFF"},  # Cyan
+                                {"name": "Satin", "color": "#FF00FF"}  # Magenta
+                            ]
+                        },
+                        "predictions": {
+                            "mask_data": pred_mask_np,
+                            "class_labels": {0: "Background", 1: "Fill", 2: "Satin"},
+                            "classes": [
+                                {"name": "Background", "color": "#000000"},
+                                {"name": "Fill", "color": "#00FFFF"},  # Cyan
+                                {"name": "Satin", "color": "#FF00FF"}  # Magenta
+                            ]
+                        }
+                    }
                 ))
 
         # --- PHA VALIDATION ---
