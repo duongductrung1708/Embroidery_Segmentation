@@ -77,12 +77,31 @@ def main():
     ])
     
     for img_path in tqdm(image_paths, desc="Dự đoán"):
-        img_bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-        if img_bgr is None:
+        # Đọc ảnh giữ nguyên Alpha channel
+        img_rgba = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        if img_rgba is None:
             continue
-            
-        orig_h, orig_w = img_bgr.shape[:2]
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        orig_h, orig_w = img_rgba.shape[:2]
+
+        # Giữ ảnh BGR để làm overlay
+        if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
+            img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
+
+            # ===============================
+            # QUAN TRỌNG:
+            # Lấy Alpha channel làm input giống hệt lúc train
+            # ===============================
+            img_gray = img_rgba[:, :, 3]
+
+        elif img_rgba.ndim == 3:
+            img_bgr = img_rgba
+            img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        else:
+            # Ảnh grayscale
+            img_gray = img_rgba
+            img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
         
         # 1. Transform ảnh
         transformed = transform(image=img_gray)
