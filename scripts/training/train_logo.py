@@ -18,7 +18,7 @@ from albumentations.pytorch import ToTensorV2
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT)) 
 
-from src.dataset_logo import EmbroideryDatasetLogo
+from src.dataset_svg import EmbroideryDatasetSVG
 from src.model import U2NET 
 
 # Kéo toàn bộ "đồ nghề" từ hộp utils_logo
@@ -93,9 +93,9 @@ def main():
     # ==========================================
     # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
     # ==========================================
-    train_dataset = EmbroideryDatasetLogo(image_dir="data/logo/train/images", mask_dir="data/logo/train/masks", transform=train_transform, crops_per_image=TEMP_CROPS)
-    val_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=val_transform, crops_per_image=TEMP_CROPS)
-    tracking_dataset = EmbroideryDatasetLogo(image_dir="data/logo/val/images", mask_dir="data/logo/val/masks", transform=tracking_transform, crops_per_image=1)
+    train_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/train_svg", transform=train_transform, crops_per_image=TEMP_CROPS, augment_color=True, target_size=TEMP_IMAGE_SIZE)
+    val_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE)
+    tracking_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
