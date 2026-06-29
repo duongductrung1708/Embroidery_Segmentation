@@ -109,7 +109,7 @@ def main():
     # ==========================================
     wandb.init(
         project="embroidery-segmentation", 
-        name="logo-v7-3class-improved",         
+        name="logo-v8-3class-improved",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
@@ -121,7 +121,9 @@ def main():
             "fill_weight": 3, 
             "satin_weight": 8,
             "crops_per_image": TEMP_CROPS,
-            "label_smoothing": 0.02
+            "label_smoothing": 0.02,
+            "train_samples": len(train_dataset),
+            "val_samples": len(val_dataset)
         }
     )
     config = wandb.config 
@@ -133,6 +135,7 @@ def main():
     fixed_val_batch = next(iter(tracking_loader))
     fixed_val_images = fixed_val_batch[0].to(device)
     fixed_val_masks = fixed_val_batch[1].to(device)
+    fixed_val_rgb = fixed_val_batch[2]  # Original colored SVG for visualization
 
     # ==========================================
     # 4. CHUẨN BỊ BỘ NÃO U-2-NET & LOSS FUNCTION
@@ -189,12 +192,17 @@ def main():
         running_train_loss = 0.0
         all_train_preds = []
         all_train_masks = []
+        train_rgb_samples = []  # Store RGB samples for visualization
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
 
-        for images, masks in loop:
+        for batch_idx, (images, masks, rgb_images) in enumerate(loop):
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
+            
+            # Store first batch RGB images for visualization
+            if batch_idx == 0:
+                train_rgb_samples = rgb_images[:min(4, rgb_images.size(0))]
             
             with torch.autocast(device_type=device.type):
                 outputs = model(images)  
@@ -237,6 +245,16 @@ def main():
         train_iou_fill = train_metrics['iou_fill']
         train_iou_satin = train_metrics['iou_satin']
         train_mean_iou = train_metrics['mean_iou']
+        
+        # Log training RGB samples to wandb
+        if len(train_rgb_samples) > 0:
+            train_wandb_images = []
+            for i in range(min(4, len(train_rgb_samples))):
+                rgb_np = train_rgb_samples[i].numpy()
+                train_wandb_images.append(wandb.Image(
+                    rgb_np,
+                    caption=f"Train Input #{i+1} (Epoch {epoch+1})"
+                ))
 
         # --- PHA VALIDATION ---
         model.eval()
@@ -245,7 +263,7 @@ def main():
         all_val_masks = []
         
         with torch.no_grad():
-            for val_images, val_masks in val_loader:
+            for val_images, val_masks, val_rgb_images in val_loader:
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
                 val_outputs = model(val_images)
                 
@@ -277,8 +295,11 @@ def main():
             wandb_log_images = []
             num_images = min(4, fixed_val_images.size(0))
             for i in range(num_images):
-                img_np = fixed_val_images[i].cpu().numpy().squeeze() 
+                # Original colored SVG input
+                rgb_np = fixed_val_rgb[i].numpy()  # RGB image
                 
+                # Alpha channel input (what model sees)
+                img_np = fixed_val_images[i].cpu().numpy().squeeze() 
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
                 else:
@@ -287,9 +308,10 @@ def main():
                 true_mask_np = fixed_val_masks[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = fixed_preds[i].cpu().numpy().astype(np.uint8)
                 
+                # Log original colored SVG with masks
                 wandb_img = wandb.Image(
-                    img_np, 
-                    caption=f"Toan Canh #{i+1} (Epoch {epoch+1})",
+                    rgb_np,  # Use original colored SVG as base image
+                    caption=f"Original SVG #{i+1} (Epoch {epoch+1})",
                     masks={
                         "ground_truth": {
                             "mask_data": true_mask_np,
@@ -312,6 +334,12 @@ def main():
                     }
                 )
                 wandb_log_images.append(wandb_img)
+                
+                # Also log alpha channel input for comparison
+                wandb_log_images.append(wandb.Image(
+                    img_np,
+                    caption=f"Alpha Input #{i+1} (Epoch {epoch+1})"
+                ))
 
         avg_val_loss = running_val_loss / len(val_loader)
         # Sử dụng metrics từ torchmetrics trên toàn bộ val set
@@ -347,6 +375,7 @@ def main():
             "IoU_Fill/Val": val_iou_fill,
             "IoU_Satin/Train": train_iou_satin,
             "IoU_Satin/Val": val_iou_satin,
+            "Train_Images": train_wandb_images if len(train_rgb_samples) > 0 else None,
             "Validation_Images": wandb_log_images
         })
 

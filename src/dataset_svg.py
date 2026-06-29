@@ -274,6 +274,9 @@ class EmbroideryDatasetSVG(Dataset):
         # Extract alpha channel as input
         alpha_channel = img_array[:, :, 3].astype(np.float32)
         
+        # Extract RGB channels for visualization (original colored SVG)
+        rgb_image = img_array[:, :, :3].astype(np.uint8)  # RGB for visualization
+        
         # 5. Create label mask from original SVG (not augmented)
         mask = create_label_mask(svg_path, self.target_size, self.target_size, metadata)
         mask_binary = mask.astype(np.float32)
@@ -288,4 +291,4 @@ class EmbroideryDatasetSVG(Dataset):
             image_tensor = torch.tensor(alpha_channel / 255.0).unsqueeze(0)
             mask_tensor = torch.tensor(mask_binary).long()
         
-        return image_tensor, mask_tensor
+        return image_tensor, mask_tensor, rgb_image
