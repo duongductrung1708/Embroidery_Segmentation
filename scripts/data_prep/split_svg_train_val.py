@@ -151,6 +151,23 @@ def find_best_seed(buckets: Dict[int, list], files_with_counts: list,
 
 
 
+def clear_dir(folder: str):
+    """Xoá toàn bộ *.svg đang có trong folder (không xoá folder, không đụng
+    file khác loại). Cần làm trước mỗi lần copy để tránh file của lần chạy
+    trước (với cách chia khác) còn sót lại, gây trùng dữ liệu giữa
+    train_dir và val_dir.
+    """
+    folder = Path(folder)
+    if not folder.exists():
+        return
+    removed = 0
+    for f in folder.glob("*.svg"):
+        f.unlink()
+        removed += 1
+    if removed:
+        print(f"  Đã xoá {removed} file .svg cũ trong {folder}")
+
+
 def split_svg_files(source_dirs: List[str], train_dir: str, val_dir: str,
                      train_ratio: float = 0.7, seed: int = 42, n_buckets: int = 4,
                      auto_seed: bool = False, n_trials: int = 200):
@@ -168,6 +185,15 @@ def split_svg_files(source_dirs: List[str], train_dir: str, val_dir: str,
     """
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(val_dir, exist_ok=True)
+
+    # --- QUAN TRỌNG: dọn sạch train_dir/val_dir trước khi copy lại ---
+    # Nếu không làm bước này, file từ lần chạy trước (với cách chia khác,
+    # ví dụ seed khác hoặc n_buckets khác) sẽ vẫn còn nguyên trong train_dir,
+    # và nếu lần này nó rơi vào val_dir thì file đó tồn tại ở CẢ HAI tập
+    # cùng lúc -> rò rỉ dữ liệu (data leakage) giữa train và val.
+    print("Dọn dẹp thư mục đích trước khi chia lại...")
+    clear_dir(train_dir)
+    clear_dir(val_dir)
 
     all_files = []  # list of Path, gộp từ mọi source_dir
 
@@ -223,12 +249,35 @@ def split_svg_files(source_dirs: List[str], train_dir: str, val_dir: str,
     for svg_file in all_val_files:
         shutil.copy2(svg_file, os.path.join(val_dir, svg_file.name))
 
+    # --- Kiểm tra an toàn: xác nhận không có file trùng tên giữa 2 tập ---
+    check_no_overlap(train_dir, val_dir)
+
     # --- Kiểm tra nhanh kết quả phân bố (để đối chiếu, không bắt buộc) ---
     print_distribution_check(all_train_files, all_val_files)
 
     print(f"\nCompleted!")
     print(f"Train files saved to: {train_dir}")
     print(f"Val files saved to: {val_dir}")
+
+
+def check_no_overlap(train_dir: str, val_dir: str):
+    """Xác nhận không có file .svg trùng tên giữa train_dir và val_dir
+    sau khi copy. In CẢNH BÁO rõ ràng nếu phát hiện trùng (không nên xảy ra
+    nếu clear_dir() đã chạy đúng, nhưng kiểm tra lại cho chắc).
+    """
+    train_names = {f.name for f in Path(train_dir).glob("*.svg")}
+    val_names = {f.name for f in Path(val_dir).glob("*.svg")}
+    overlap = train_names & val_names
+
+    if overlap:
+        print(f"\n  !!! CẢNH BÁO: {len(overlap)} file trùng tên giữa train và val !!!")
+        for name in sorted(overlap):
+            print(f"     - {name}")
+        print("  -> Đây là data leakage, cần kiểm tra lại nguồn dữ liệu "
+              "(có thể 2 file trùng tên nhưng đến từ source_dir khác nhau).")
+    else:
+        print(f"\n  [OK] Không có file trùng giữa train ({len(train_names)} file) "
+              f"và val ({len(val_names)} file).")
 
 
 def print_distribution_check(train_files: list, val_files: list):
