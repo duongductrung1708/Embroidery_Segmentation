@@ -18,7 +18,10 @@ from src.model import U2NET
 # 1. CẤU HÌNH DỰ ĐOÁN LOGO 3 CLASS
 # ==========================================
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-IMAGE_SIZE = 512
+
+# [QUAN TRỌNG NHẤT]: BẮT BUỘC PHẢI LÀ 768 ĐỂ ĐỒNG BỘ VỚI QUÁ TRÌNH TRAIN
+IMAGE_SIZE = 768 
+
 MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth"  # File trọng số Logo của bạn
 
 # ---> Cấu hình đường dẫn cho 1 ẢNH DUY NHẤT ở đây <---
@@ -39,7 +42,7 @@ if os.path.exists(MODEL_PATH):
         model.load_state_dict(checkpoint)
         
     model.eval()
-    print("-> Da nap thanh cong bo nao AI LOGO (U-2-NET)!")
+    print(f"-> Da nap thanh cong bo nao AI LOGO (U-2-NET) - Size {IMAGE_SIZE}x{IMAGE_SIZE}!")
 else:
     print(f"-> Khong tim thay file model '{MODEL_PATH}'. Ban da train xong chua?")
     exit()
@@ -58,35 +61,37 @@ def process_image(img_path):
 
     orig_h, orig_w = img_rgba.shape[:2]
 
-    # Nếu ảnh có alpha thì lấy alpha giống lúc train
+    # Kênh đầu vào: Lấy Alpha channel (Vì model V8 hiện tại được train trên Alpha)
     if img_rgba.shape[2] == 4:
         input_image = img_rgba[:, :, 3]
+        img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
     else:
-        # fallback nếu ảnh không có alpha
-        input_image = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2GRAY)
+        # Tạo alpha channel từ grayscale (nền đen -> alpha=0, logo -> alpha>0)
+        gray = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2GRAY)
+        # Invert: nền đen (0) -> alpha=0, logo sáng (>0) -> alpha>0
+        input_image = (255 - gray).astype(np.uint8)
+        img_bgr = img_rgba
 
-    # chỉ dùng để hiển thị
-    img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
-    
-    # Tính toán tỷ lệ để thu gọn cạnh dài nhất về 512
+    # Tính toán tỷ lệ để thu gọn cạnh dài nhất về chuẩn IMAGE_SIZE (768)
     scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
     new_h, new_w = int(orig_h * scale), int(orig_w * scale)
     
-    resized_gray = cv2.resize(input_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    # Dùng cv2.INTER_AREA khi thu nhỏ để giữ nguyên độ dày của pixel Satin
+    resized_input = cv2.resize(input_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
-    # Bọc thêm viền đen (Padding) để ảnh đạt đúng khung 512x512
+    # Bọc thêm viền đen (Padding) để ảnh đạt đúng khung vuông 768x768
     pad_top = (IMAGE_SIZE - new_h) // 2
     pad_bottom = IMAGE_SIZE - new_h - pad_top
     pad_left = (IMAGE_SIZE - new_w) // 2
     pad_right = IMAGE_SIZE - new_w - pad_left
     
-    padded_gray = cv2.copyMakeBorder(resized_gray, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+    padded_input = cv2.copyMakeBorder(resized_input, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
 
     # ==========================================
     # BƯỚC 2: AI PHÂN TÍCH (U-2-NET)
     # ==========================================
     # Đưa ảnh uint8 (0-255) về Tensor float32 (0-1)
-    input_tensor = torch.tensor(padded_gray, dtype=torch.float32).unsqueeze(0).unsqueeze(0) / 255.0
+    input_tensor = torch.tensor(padded_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0) / 255.0
     input_tensor = input_tensor.to(DEVICE)
     
     with torch.no_grad():
@@ -103,6 +108,7 @@ def process_image(img_path):
     crop_mask = pred_mask[pad_top:pad_top+new_h, pad_left:pad_left+new_w]
     
     # Phóng to ảnh dự đoán về lại đúng số pixel nguyên bản của Logo
+    # Bắt buộc dùng INTER_NEAREST để các nhãn 0, 1, 2 không bị trộn lẫn (anti-aliasing)
     final_mask = cv2.resize(crop_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
     # Đổ màu chuẩn: Lớp 1 (Fill) -> Cyan | Lớp 2 (Satin) -> Magenta

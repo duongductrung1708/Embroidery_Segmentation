@@ -2,7 +2,7 @@
 """
 Embroidery Segmentation - Batch Inference Script
 Quét toàn bộ ảnh trong thư mục, đưa qua U2-Net và lưu kết quả hàng loạt.
-Đã đồng bộ kỹ thuật Global Context (Toàn cảnh) với quá trình Training.
+Đã đồng bộ kỹ thuật Global Context (Toàn cảnh) với quá trình Training (Size 768).
 """
 
 import os
@@ -26,13 +26,15 @@ from src.model import U2NET
 # ==========================================
 # CẤU HÌNH CÁC THAM SỐ
 # ==========================================
-MODEL_WEIGHTS_PATH = os.path.join(PROJECT_ROOT, "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth") # Sửa lại tên file pth nếu bạn lưu tên khác
+MODEL_WEIGHTS_PATH = os.path.join(PROJECT_ROOT, "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth") 
 TEST_DIR = os.path.join(PROJECT_ROOT, "data/test/logo")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data/test/logo/predictions")
-IMAGE_SIZE = 512
+
+# [ĐÃ SỬA LỖI]: BẮT BUỘC LÀ 768 ĐỂ ĐỒNG BỘ VỚI QUÁ TRÌNH TRAIN (KHÔNG LÀM TEO NÉT SATIN)
+IMAGE_SIZE = 768
 
 def load_testing_model(weights_path, device):
-    print(f"[*] Đang tải bộ não U2-Net (1 kênh vào, 3 kênh ra)...")
+    print(f"[*] Đang tải bộ não U2-Net (1 kênh vào, 3 kênh ra) - Kích thước {IMAGE_SIZE}x{IMAGE_SIZE}...")
     model = U2NET(in_ch=1, out_ch=3)
     
     if not os.path.exists(weights_path):
@@ -87,23 +89,26 @@ def main():
         # Giữ ảnh BGR để làm overlay
         if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
             img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
-
-            # ===============================
-            # QUAN TRỌNG:
-            # Lấy Alpha channel làm input giống hệt lúc train
-            # ===============================
+            # Lấy Alpha channel làm input giống hệt lúc train (Model V8 của bạn)
             img_gray = img_rgba[:, :, 3]
 
         elif img_rgba.ndim == 3:
             img_bgr = img_rgba
+            # Tạo alpha channel từ grayscale (nền đen -> alpha=0, logo -> alpha>0)
             img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            # Invert: nền đen (0) -> alpha=0, logo sáng (>0) -> alpha>0
+            alpha_channel = (255 - img_gray).astype(np.uint8)
+            img_gray = alpha_channel
 
         else:
             # Ảnh grayscale
             img_gray = img_rgba
             img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+            # Tạo alpha channel từ grayscale
+            alpha_channel = (255 - img_gray).astype(np.uint8)
+            img_gray = alpha_channel
         
-        # 1. Transform ảnh
+        # 1. Transform ảnh bằng Albumentations
         transformed = transform(image=img_gray)
         
         # 2. CHUẨN HÓA DỮ LIỆU (/ 255.0) VÀ ĐƯA LÊN GPU
@@ -116,13 +121,16 @@ def main():
 
         # 4. Hậu xử lý & Crop ngược phần viền đen để về đúng kích thước gốc
         predicted_color_mask = color_code_mask(pred_mask)
+        
+        # Tái tạo lại logic tính toán Padding của Albumentations để crop ngược
         scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
         new_h, new_w = int(orig_h * scale), int(orig_w * scale)
         pad_top = (IMAGE_SIZE - new_h) // 2
         pad_left = (IMAGE_SIZE - new_w) // 2
         
         crop_mask = predicted_color_mask[pad_top:pad_top+new_h, pad_left:pad_left+new_w]
-        # Dùng INTER_NEAREST để màu không bị lem
+        
+        # Dùng INTER_NEAREST để màu không bị lem (giữ nguyên nhãn)
         final_mask = cv2.resize(crop_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         overlay_img = cv2.addWeighted(img_bgr, 0.6, final_mask, 0.4, 0)
         
