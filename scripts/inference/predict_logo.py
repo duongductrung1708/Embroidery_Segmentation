@@ -17,7 +17,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # 1. ĐỊNH VỊ ĐƯỜNG DẪN DỰ ÁN
-# Lùi 3 cấp: predict_logo.py -> inference -> scripts -> Embroidery_Segmentation
+# Lùi 3 cấp: predict.py -> inference -> scripts -> Embroidery_Segmentation
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -86,27 +86,35 @@ def main():
 
         orig_h, orig_w = img_rgba.shape[:2]
 
-        # Giữ ảnh BGR để làm overlay
+        # --- ĐOẠN CODE ĐÃ ĐƯỢC NÂNG CẤP XỬ LÝ LOGO ĐEN ---
         if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
             img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
-            # Lấy Alpha channel làm input giống hệt lúc train (Model V8 của bạn)
-            img_gray = img_rgba[:, :, 3]
+            alpha_channel = img_rgba[:, :, 3]
+            
+            # 1. Chuyển sang Grayscale để lấy chi tiết nét vẽ bên trong
+            img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            
+            # 2. ÉP DẢI MÀU: Đảm bảo logo màu đen không bị chìm vào nền
+            img_gray_compressed = (img_gray.astype(np.float32) * (155.0 / 255.0)).astype(np.uint8)
+            alpha_base = (alpha_channel.astype(np.float32) * (100.0 / 255.0)).astype(np.uint8)
+            
+            # Hợp nhất: Nơi nào có Alpha > 0 sẽ được cộng thêm độ sáng nền
+            img_gray = cv2.add(img_gray_compressed, alpha_base)
+            
+            # 3. Ép phần nền trong suốt về 0 tuyệt đối
+            img_gray[alpha_channel == 0] = 0
 
         elif img_rgba.ndim == 3:
             img_bgr = img_rgba
-            # Tạo alpha channel từ grayscale (nền đen -> alpha=0, logo -> alpha>0)
-            img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            # Invert: nền đen (0) -> alpha=0, logo sáng (>0) -> alpha>0
-            alpha_channel = (255 - img_gray).astype(np.uint8)
-            img_gray = alpha_channel
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            img_gray = (255 - gray).astype(np.uint8)
 
         else:
             # Ảnh grayscale
             img_gray = img_rgba
             img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
-            # Tạo alpha channel từ grayscale
-            alpha_channel = (255 - img_gray).astype(np.uint8)
-            img_gray = alpha_channel
+            img_gray = (255 - img_gray).astype(np.uint8)
+        # ---------------------------------------------
         
         # 1. Transform ảnh bằng Albumentations
         transformed = transform(image=img_gray)

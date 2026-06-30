@@ -50,7 +50,7 @@ else:
 def process_image(img_path):
     """
     Hàm xử lý lõi Logo: 
-    Resize -> Padding -> AI Predict -> Crop ngược -> Đổ màu (Xanh/Đỏ).
+    Resize -> Padding -> AI Predict -> Crop ngược -> Đổ màu (Cyan/Magenta).
     """
     # ==========================================
     # BƯỚC 1: ĐỌC ẢNH VÀ CHUẨN BỊ CANVAS
@@ -61,16 +61,33 @@ def process_image(img_path):
 
     orig_h, orig_w = img_rgba.shape[:2]
 
-    # Kênh đầu vào: Lấy Alpha channel (Vì model V8 hiện tại được train trên Alpha)
-    if img_rgba.shape[2] == 4:
-        input_image = img_rgba[:, :, 3]
+    # --- ĐOẠN CODE ĐÃ ĐƯỢC NÂNG CẤP XỬ LÝ LOGO ĐEN ---
+    if len(img_rgba.shape) == 3 and img_rgba.shape[2] == 4:
+        # Tách ảnh màu (BGR) và kênh trong suốt (Alpha)
         img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
+        alpha_channel = img_rgba[:, :, 3]
+        
+        # 1. Chuyển sang Grayscale để lấy chi tiết nét vẽ bên trong
+        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        
+        # 2. ÉP DẢI MÀU: Đảm bảo logo màu đen không bị chìm vào nền
+        # Thu nhỏ chênh lệch Grayscale và cộng thêm 100 độ sáng vào vùng có logo
+        img_gray_compressed = (img_gray.astype(np.float32) * (155.0 / 255.0)).astype(np.uint8)
+        alpha_base = (alpha_channel.astype(np.float32) * (100.0 / 255.0)).astype(np.uint8)
+        
+        # Hợp nhất: Nơi nào có Alpha > 0 sẽ được cộng thêm độ sáng nền
+        input_image = cv2.add(img_gray_compressed, alpha_base)
+        
+        # 3. Ép phần nền trong suốt về 0 tuyệt đối
+        input_image[alpha_channel == 0] = 0
+        
     else:
-        # Tạo alpha channel từ grayscale (nền đen -> alpha=0, logo -> alpha>0)
-        gray = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2GRAY)
-        # Invert: nền đen (0) -> alpha=0, logo sáng (>0) -> alpha>0
-        input_image = (255 - gray).astype(np.uint8)
-        img_bgr = img_rgba
+        # Xử lý cho ảnh JPG không có nền trong suốt (Thường nền là màu trắng)
+        img_bgr = img_rgba if len(img_rgba.shape) == 3 else cv2.cvtColor(img_rgba, cv2.COLOR_GRAY2BGR)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        # Đảo ngược màu: Nền trắng (255) -> 0, Logo đen (0) -> 255
+        input_image = (255 - gray).astype(np.uint8) 
+    # ---------------------------------------------
 
     # Tính toán tỷ lệ để thu gọn cạnh dài nhất về chuẩn IMAGE_SIZE (768)
     scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
@@ -146,6 +163,8 @@ def single_image_inference(img_path, save_output=True):
     # Giao diện Matplotlib trực quan (Chuyển BGR -> RGB)
     print("[*] Dang hien thi ket qua...")
     img_bgr = cv2.imread(img_path)
+    if len(img_bgr.shape) == 3 and img_bgr.shape[2] == 4:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
     
     plt.figure(figsize=(15, 5))
     
