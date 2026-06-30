@@ -178,7 +178,7 @@ def main():
     else:
         print("\n[TRAIN MOI] Bat dau huan luyen U2-Net cho Logo 3-class...")
 
-    EARLY_STOPPING_PATIENCE = 12
+    EARLY_STOPPING_PATIENCE = 100
     epochs_no_improve = 0
 
     # ==========================================
