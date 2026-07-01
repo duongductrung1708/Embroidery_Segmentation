@@ -35,36 +35,49 @@ def main():
     BATCH_SIZE = 2  # Giảm từ 4 xuống 2 để tránh OOM với resolution 768
     NUM_CLASSES = 3  # Background, Fill, Satin
 
-    # --- TẬP TRAIN: THU NHỎ & CHÈN VIỀN TOÀN CẢNH ---
     train_transform = A.Compose([
-        # Bắt buộc: Ép logo về 512x512 mà không làm méo tỷ lệ
         A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
         A.PadIfNeeded(
-            min_height=TEMP_IMAGE_SIZE, 
-            min_width=TEMP_IMAGE_SIZE, 
-            border_mode=cv2.BORDER_CONSTANT, 
-            fill=0, 
+            min_height=TEMP_IMAGE_SIZE,
+            min_width=TEMP_IMAGE_SIZE,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=0,
             fill_mask=0
         ),
-        
-        # Các phép biến đổi hình học (Rất cần thiết để AI học hình dáng đa dạng)
-        A.HorizontalFlip(p=0.5), 
-        A.VerticalFlip(p=0.5),   
+
+        # --- Hình học ---
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
         A.Affine(
-            translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)}, 
-            scale=(0.85, 1.15), 
-            rotate=(-180, 180), 
-            interpolation=cv2.INTER_NEAREST, # Bắt buộc NEAREST để giữ nguyên nhãn 0,1,2
-            border_mode=cv2.BORDER_CONSTANT, 
-            fill=0, 
-            fill_mask=0, 
+            translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
+            scale=(0.85, 1.15),
+            rotate=(-180, 180),
+            interpolation=cv2.INTER_NEAREST,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=0,
+            fill_mask=0,
             p=0.7
         ),
-        
-        ToTensorV2()             
+        A.ElasticTransform(alpha=120, sigma=6, p=0.3),
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+
+        # --- Random holes ---
+        A.CoarseDropout(
+            num_holes_range=(4, 8),
+            hole_height_range=(20, 60),
+            hole_width_range=(20, 60),
+            fill=0,
+            p=0.3
+        ),
+
+        # --- Noise on alpha channel ---
+        A.GaussNoise(var_limit=(5.0, 20.0), p=0.3),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+
+        ToTensorV2()
     ])
 
-    # --- TẬP VAL: ĐỒNG BỘ VỚI TẬP TRAIN ---
+    # --- VAL SET: SYNCHRONIZED WITH TRAIN ---
     val_transform = A.Compose([
         A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
         A.PadIfNeeded(
