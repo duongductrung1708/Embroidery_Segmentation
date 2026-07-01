@@ -25,7 +25,7 @@ IMAGE_SIZE = 768
 MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth"  # File trọng số Logo của bạn
 
 # ---> Cấu hình đường dẫn cho 1 ẢNH DUY NHẤT ở đây <---
-SINGLE_IMAGE_PATH = "./data/test/logo/test4_logo.png" # SỬA TÊN FILE CỦA BẠN TẠI ĐÂY
+SINGLE_IMAGE_PATH = "./data/svg/dirty_png/10.png" # SỬA TÊN FILE CỦA BẠN TẠI ĐÂY
 OUTPUT_DIR = "./data/test/logo/predictions/"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
