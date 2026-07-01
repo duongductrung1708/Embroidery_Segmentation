@@ -93,9 +93,9 @@ def main():
     # ==========================================
     # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
     # ==========================================
-    train_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/train_svg", transform=train_transform, crops_per_image=TEMP_CROPS, augment_color=True, target_size=TEMP_IMAGE_SIZE)
-    val_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE)
-    tracking_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE)
+    train_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/train_svg", transform=train_transform, crops_per_image=TEMP_CROPS, augment_color=True, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
+    val_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
+    tracking_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
@@ -123,7 +123,8 @@ def main():
             "crops_per_image": TEMP_CROPS,
             "label_smoothing": 0.02,
             "train_samples": len(train_dataset),
-            "val_samples": len(val_dataset)
+            "val_samples": len(val_dataset),
+            "supersample_factor": 2,
         }
     )
     config = wandb.config 

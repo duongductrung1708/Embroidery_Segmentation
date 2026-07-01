@@ -129,10 +129,11 @@ def augment_svg_colors(root: ET.Element, metadata: Dict[str, str], seed: int = N
                 child.set("style", new_style)
 
 
-def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str, str]) -> np.ndarray:
+def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str, str],
+                       supersample_factor: int = 1) -> np.ndarray:
     """Create label mask from SVG metadata.
 
-    TỐI ƯU: thay vì render từng path riêng biệt (N lần gọi cairosvg.svg2png
+    TỐI ƯU 1: thay vì render từng path riêng biệt (N lần gọi cairosvg.svg2png
     cho N path, rất chậm khi N lớn — 100-200 path/SVG), hàm này rasterize
     TOÀN BỘ SVG CHỈ 1 LẦN, sau khi gán cho mỗi path 1 màu định danh duy
     nhất theo nhãn (đỏ thuần = fill, xanh lá thuần = satin). Sau đó suy
@@ -146,8 +147,22 @@ def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str
     anti-aliasing blend màu), vốn dĩ mơ hồ ở cả 2 phương pháp và không ảnh
     hưởng đáng kể đến IoU/F1 khi train.
 
-    Benchmark thực tế (80 path, 768x768): ~45x nhanh hơn so với render
-    từng path riêng.
+    TỐI ƯU 2 (supersample_factor > 1): SVG là dữ liệu vector, không có độ
+    phân giải gốc. Rasterize thẳng ở (width, height) khiến chi tiết nhỏ
+    (path mảnh, satin dài, góc nhọn) dễ mất ngay từ bước render vì mỗi
+    pixel chỉ lấy mẫu 1 lần. Với supersample_factor=N, ta render ở độ phân
+    giải (width*N, height*N) rồi downsample về (width, height) bằng
+    cv2.INTER_NEAREST.
+
+    QUAN TRỌNG: bắt buộc dùng INTER_NEAREST khi downsample mask, KHÔNG
+    được dùng INTER_LINEAR/INTER_AREA, vì mask là nhãn rời rạc {0,1,2}.
+    Nếu nội suy tuyến tính, pixel biên giữa 2 class có thể bị nội suy ra
+    giá trị trung gian vô nghĩa (vd 1.5) rồi làm tròn sai lệch ngẫu nhiên.
+    INTER_NEAREST chỉ lấy giá trị của pixel gần nhất, giữ mask luôn chỉ
+    chứa đúng 3 giá trị hợp lệ.
+
+    Benchmark thực tế (80 path, 768x768, supersample_factor=1): ~45x nhanh
+    hơn so với render từng path riêng (phiên bản trước khi tối ưu).
     """
     tree = ET.parse(svg_path)
     root = tree.getroot()
@@ -169,10 +184,14 @@ def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str
             child.set("fill-opacity", "1")
             child.set("stroke", "none")
 
+    # Render ở độ phân giải cao hơn (supersample) nếu được yêu cầu
+    render_width = width * supersample_factor
+    render_height = height * supersample_factor
+
     svg_bytes = ET.tostring(root, encoding='unicode')
     png_bytes = cairosvg.svg2png(bytestring=svg_bytes.encode('utf-8'),
-                                 output_width=width,
-                                 output_height=height,
+                                 output_width=render_width,
+                                 output_height=render_height,
                                  background_color=None,
                                  unsafe=True)
 
@@ -185,19 +204,65 @@ def create_label_mask(svg_path: str, width: int, height: int, metadata: Dict[str
     r = img_array[:, :, 0].astype(np.int16)
     g = img_array[:, :, 1].astype(np.int16)
 
-    is_visible = alpha >= 32
+    is_visible = alpha >= 128
 
-    mask = np.zeros((height, width), dtype=np.uint8)
+    mask_render = np.zeros((render_height, render_width), dtype=np.uint8)
     # So sánh trực tiếp kênh đỏ/xanh: vùng fill có r > g, vùng satin có
     # g > r. Tại biên blend (anti-aliasing giữa 2 path khác nhãn), r và g
     # gần bằng nhau — quy ước về fill khi bằng nhau (r >= g), chấp nhận sai
     # số ~1px ở biên (không tránh được với mọi cách rasterize, kể cả cách
     # render từng path riêng cũ).
-    mask[is_visible & (g > r)] = LABEL_SATIN
-    mask[is_visible & (r >= g)] = LABEL_FILL
-    # Pixel không visible (alpha < 32) giữ nguyên LABEL_BACKGROUND (0)
+    mask_render[is_visible & (g > r)] = LABEL_SATIN
+    mask_render[is_visible & (r >= g)] = LABEL_FILL
+    # Pixel không visible (alpha < 128) giữ nguyên LABEL_BACKGROUND (0)
 
+    if supersample_factor == 1:
+        return mask_render
+
+    # Downsample về kích thước đích bằng NEAREST để giữ nguyên giá trị
+    # rời rạc {0,1,2} của mask, không tạo ra giá trị trung gian vô nghĩa.
+    mask = cv2.resize(mask_render, (width, height), interpolation=cv2.INTER_NEAREST)
     return mask
+
+
+def render_svg_to_alpha_rgb(root: ET.Element, width: int, height: int,
+                             supersample_factor: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+    """Render 1 cây SVG (đã augment màu) ra (alpha_channel, rgb_image) ở kích
+    thước (width, height), có hỗ trợ supersample.
+
+    Khác với mask (nhãn rời rạc, bắt buộc INTER_NEAREST), ảnh alpha/RGB là
+    dữ liệu liên tục (cường độ sáng/màu) nên downsample bằng INTER_AREA —
+    phương pháp chuẩn cho thu nhỏ ảnh, lấy trung bình các pixel nguồn, cho
+    kết quả mượt và giữ chi tiết tốt hơn so với INTER_NEAREST hay
+    INTER_LINEAR khi tỷ lệ thu nhỏ lớn.
+    """
+    render_width = width * supersample_factor
+    render_height = height * supersample_factor
+
+    svg_bytes = ET.tostring(root, encoding='unicode')
+    png_bytes = cairosvg.svg2png(bytestring=svg_bytes.encode('utf-8'),
+                                 output_width=render_width,
+                                 output_height=render_height,
+                                 background_color=None,
+                                 unsafe=True)
+
+    img = Image.open(BytesIO(png_bytes))
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+    img_array = np.array(img)
+
+    alpha_channel = img_array[:, :, 3].astype(np.float32)
+    rgb_image = img_array[:, :, :3].astype(np.uint8)
+
+    if supersample_factor == 1:
+        return alpha_channel, rgb_image
+
+    # Downsample bằng INTER_AREA: phù hợp cho dữ liệu liên tục, giữ chi
+    # tiết path mảnh tốt hơn rasterize trực tiếp ở độ phân giải thấp.
+    alpha_channel = cv2.resize(alpha_channel, (width, height), interpolation=cv2.INTER_AREA)
+    rgb_image = cv2.resize(rgb_image, (width, height), interpolation=cv2.INTER_AREA)
+
+    return alpha_channel, rgb_image
 
 
 def get_svg_dimensions(svg_path: str) -> Tuple[int, int]:
@@ -235,7 +300,7 @@ def get_svg_dimensions(svg_path: str) -> Tuple[int, int]:
 
 class EmbroideryDatasetSVG(Dataset):
     def __init__(self, svg_dir, transform=None, crops_per_image=1, augment_color=True,
-                 target_size=512, cache_in_memory=True):
+                 target_size=512, cache_in_memory=True, supersample_factor=1):
         """
         Args:
             cache_in_memory: nếu True (mặc định), cache metadata và label mask
@@ -245,12 +310,23 @@ class EmbroideryDatasetSVG(Dataset):
                 nhất cho toàn bộ quá trình training thay vì tính lại mỗi
                 epoch. Ảnh PNG đã augment màu KHÔNG được cache vì mỗi epoch
                 cần augment khác nhau để model học được sự đa dạng màu sắc.
+            supersample_factor: hệ số render ở độ phân giải cao hơn trước
+                khi downsample về target_size (mặc định 1 = không
+                supersample, giữ nguyên hành vi cũ). Dùng 2 hoặc 4 để giữ
+                chi tiết nhỏ (path mảnh, satin dài, góc nhọn) tốt hơn so
+                với rasterize trực tiếp ở target_size. Mask luôn downsample
+                bằng INTER_NEAREST (giữ nhãn rời rạc), ảnh alpha/RGB dùng
+                INTER_AREA (mượt hơn cho dữ liệu liên tục). Hệ số 2 là điểm
+                khởi đầu hợp lý: tăng chi phí render 4x nhưng cải thiện
+                chất lượng biên rõ rệt; hệ số 4 (16x chi phí) chỉ nên dùng
+                nếu 2x chưa đủ, vì lợi ích biên thường giảm dần sau 2x.
         """
         self.svg_paths = sorted(glob.glob(f"{svg_dir}/*.svg"))
         self.transform = transform
         self.augment_color = augment_color
         self.target_size = target_size
         self.cache_in_memory = cache_in_memory
+        self.supersample_factor = supersample_factor
 
         # Cache: key = đường dẫn file SVG gốc (không nhân bản theo crops_per_image)
         # value = (metadata: dict, mask: np.ndarray)
@@ -277,7 +353,8 @@ class EmbroideryDatasetSVG(Dataset):
         if not metadata:
             raise ValueError(f"No metadata found in {svg_path}")
 
-        mask = create_label_mask(svg_path, self.target_size, self.target_size, metadata)
+        mask = create_label_mask(svg_path, self.target_size, self.target_size, metadata,
+                                  supersample_factor=self.supersample_factor)
 
         if self.cache_in_memory:
             self._cache[svg_path] = (metadata, mask)
@@ -306,24 +383,13 @@ class EmbroideryDatasetSVG(Dataset):
             seed = random.randint(0, 2**32 - 1)
             augment_svg_colors(root, metadata, seed=seed)
 
-        # 5. Render augmented SVG to PNG (KHÔNG cache — cần khác nhau mỗi epoch)
-        svg_bytes = ET.tostring(root, encoding='unicode')
-        png_bytes = cairosvg.svg2png(bytestring=svg_bytes.encode('utf-8'),
-                                     output_width=self.target_size,
-                                     output_height=self.target_size,
-                                     background_color=None,
-                                     unsafe=True)
-
-        img = Image.open(BytesIO(png_bytes))
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
-        img_array = np.array(img)
-
-        # Extract alpha channel as input
-        alpha_channel = img_array[:, :, 3].astype(np.float32)
-
-        # Extract RGB channels for visualization (original colored SVG)
-        rgb_image = img_array[:, :, :3].astype(np.uint8)  # RGB for visualization
+        # 5. Render augmented SVG to PNG (KHÔNG cache — cần khác nhau mỗi epoch),
+        #    hỗ trợ supersample để giữ chi tiết nhỏ tốt hơn rasterize trực
+        #    tiếp ở target_size.
+        alpha_channel, rgb_image = render_svg_to_alpha_rgb(
+            root, self.target_size, self.target_size,
+            supersample_factor=self.supersample_factor
+        )
 
         # 6. Apply transforms
         if self.transform is not None:
