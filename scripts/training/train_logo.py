@@ -127,7 +127,7 @@ def main():
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
             "dataset": "Logo_3Class_V2",
-            "epochs": 50,
+            "epochs": 200,
             "batch_size": BATCH_SIZE,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
