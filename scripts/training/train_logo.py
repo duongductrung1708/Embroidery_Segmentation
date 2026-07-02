@@ -30,7 +30,7 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768
     TEMP_CROPS = 1
-    BATCH_SIZE = 4
+    BATCH_SIZE = 2
     NUM_CLASSES = 3
 
     # Lưu ý: A.PadIfNeeded với fill=0 trên ảnh RGBA sẽ chèn padding là (0,0,0,0) - tức là viền trong suốt
