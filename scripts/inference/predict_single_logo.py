@@ -18,7 +18,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.ba
 IMAGE_SIZE = 768 
 MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth" 
 
-SINGLE_IMAGE_PATH = "./data/test/logo/test1_logo.png"
+SINGLE_IMAGE_PATH = "./data/test/logo/test2_logo.png"
 OUTPUT_DIR = "./data/test/logo/predictions/"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
