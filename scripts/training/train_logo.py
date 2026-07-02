@@ -154,7 +154,7 @@ def main():
     # ==========================================
     # 4. CHUẨN BỊ BỘ NÃO U-2-NET & LOSS FUNCTION
     # ==========================================
-    model = U2NET(in_ch=1, out_ch=NUM_CLASSES).to(device)
+    model = U2NET(in_ch=3, out_ch=NUM_CLASSES).to(device)
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
     
     focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.02)
@@ -343,7 +343,8 @@ def main():
                 rgb_np = fixed_val_rgb[i].numpy()  # RGB image
                 
                 # Alpha channel input (what model sees)
-                img_np = fixed_val_images[i].cpu().numpy().squeeze() 
+                img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy() 
+                
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
                 else:
@@ -382,7 +383,7 @@ def main():
                 # Also log alpha channel input for comparison
                 wandb_log_images.append(wandb.Image(
                     img_np,
-                    caption=f"Alpha Input #{i+1} (Epoch {epoch+1})"
+                    caption=f"RGB Input #{i+1} (Epoch {epoch+1})"
                 ))
 
         avg_val_loss = running_val_loss / len(val_loader)

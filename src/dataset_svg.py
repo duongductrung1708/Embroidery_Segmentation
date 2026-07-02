@@ -393,12 +393,14 @@ class EmbroideryDatasetSVG(Dataset):
 
         # 6. Apply transforms
         if self.transform is not None:
-            augmented = self.transform(image=alpha_channel, mask=mask_binary)
-            image_tensor = augmented['image'] / 255.0  # Normalize to [0, 1]
-            mask_tensor = augmented['mask'].long()     # LongTensor for CrossEntropy
+            # Đổi alpha_channel thành rgb_image
+            augmented = self.transform(image=rgb_image, mask=mask_binary)
+            image_tensor = augmented['image'].float() / 255.0  # Normalize to [0, 1]
+            mask_tensor = augmented['mask'].long()
         else:
             # Fallback if no transform
-            image_tensor = torch.tensor(alpha_channel / 255.0).unsqueeze(0)
+            # Ảnh RGB có shape (H, W, C), cần chuyển thành (C, H, W) cho PyTorch
+            image_tensor = torch.tensor(rgb_image).permute(2, 0, 1).float() / 255.0
             mask_tensor = torch.tensor(mask_binary).long()
 
         return image_tensor, mask_tensor, rgb_image
