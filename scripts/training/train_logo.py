@@ -30,7 +30,7 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768
     TEMP_CROPS = 1
-    BATCH_SIZE = 2
+    BATCH_SIZE = 4
     NUM_CLASSES = 3
 
     # Lưu ý: A.PadIfNeeded với fill=0 trên ảnh RGBA sẽ chèn padding là (0,0,0,0) - tức là viền trong suốt
@@ -48,18 +48,18 @@ def main():
         A.Affine(
             translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
             scale=(0.85, 1.15),
-            rotate=(-180, 180),
+            rotate=(-30, 30),
             interpolation=cv2.INTER_NEAREST,
             border_mode=cv2.BORDER_CONSTANT,
             fill=0,
             fill_mask=0,
             p=0.7
         ),
-        A.ElasticTransform(alpha=120, sigma=6, p=0.3),
-        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+        # A.ElasticTransform(alpha=120, sigma=6, p=0.3),
+        # A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
         A.CoarseDropout(
-            num_holes_range=(4, 8), hole_height_range=(20, 60),
-            hole_width_range=(20, 60), fill=0, p=0.3
+            num_holes_range=(4, 8), hole_height_range=(10, 30),
+            hole_width_range=(10, 30), fill=0, p=0.3
         ),
         A.GaussNoise(std_range=(0.01, 0.02), p=0.3),
         A.GaussianBlur(blur_limit=(3, 5), p=0.2),
@@ -113,8 +113,8 @@ def main():
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
             "input_channels": 4, # Ghi chú cấu hình 4 kênh
-            "fill_weight": 3, 
-            "satin_weight": 8,
+            "fill_weight": 2, 
+            "satin_weight": 5,
             "supersample_factor": 2,
         }
     )
@@ -134,7 +134,7 @@ def main():
     model = U2NET(in_ch=4, out_ch=NUM_CLASSES).to(device) 
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
     
-    focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.02)
+    focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0)
     dice_loss_fn = GeneralizedDiceLoss(num_classes=NUM_CLASSES)
     bce_boundary_fn = nn.BCEWithLogitsLoss()
     
