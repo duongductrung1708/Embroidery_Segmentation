@@ -131,7 +131,7 @@ def main():
     # ==========================================
     # 4. CHUẨN BỊ BỘ NÃO U-2-NET (4 CHANNELS)
     # ==========================================
-    model = U2NET(in_ch=4, out_ch=NUM_CLASSES).to(device) # <--- ĐÃ SỬA THÀNH 4 KÊNH
+    model = U2NET(in_ch=4, out_ch=NUM_CLASSES).to(device) 
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
     
     focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.02)
@@ -152,7 +152,6 @@ def main():
     scaler = GradScaler(device.type) 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
-    # KHUYẾN CÁO: Bạn phải XÓA checkpoint cũ đi trước khi chạy nhé!
     if os.path.exists(LAST_CHECKPOINT_PATH):
         try:
             checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
@@ -162,7 +161,7 @@ def main():
             best_val_f1 = checkpoint.get('best_val_f1', 0.0)
             print(f"-> Phuc hoi! Chay tiep tu Epoch {start_epoch + 1}.")
         except Exception as e:
-            print(f"\nLOI LOAD CHECKPOINT (Có thể do sai số kênh Input): {e}")
+            print(f"\nLOI LOAD CHECKPOINT: {e}")
             print("Vui lòng XÓA file checkpoint cũ để train lại với mô hình 4 kênh!")
             exit()
     else:
@@ -175,6 +174,7 @@ def main():
     # 5. VÒNG LẶP HUẤN LUYỆN
     # ==========================================
     for epoch in range(start_epoch, config.epochs):
+        # --- PHA TRAIN ---
         model.train()
         running_train_loss = 0.0
         all_train_preds = []
@@ -227,7 +227,14 @@ def main():
         avg_train_loss = running_train_loss / len(train_loader)
         all_train_preds = torch.cat(all_train_preds, dim=0)
         all_train_masks = torch.cat(all_train_masks, dim=0)
+        
+        # Lấy metrics từ Torchmetrics (Train)
         train_metrics = calculate_metrics_torchmetrics(all_train_preds, all_train_masks, num_classes=NUM_CLASSES)
+        train_macro_f1 = train_metrics['macro_f1']
+        train_mean_iou = train_metrics['mean_iou']
+        train_iou_bg = train_metrics['iou_background']
+        train_iou_fill = train_metrics['iou_fill']
+        train_iou_satin = train_metrics['iou_satin']
         
         train_wandb_images = []
         if len(train_rgb_samples) > 0 and len(train_pred_samples) > 0:
@@ -281,18 +288,15 @@ def main():
             for i in range(num_images):
                 rgb_np = fixed_val_rgb[i].numpy() 
                 
-                # Tensor 4 Kênh: (4, H, W) -> (H, W, 4)
                 img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy() 
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
                 else:
                     img_np = img_np.astype(np.uint8)
                     
-                # Tách kênh RGB và kênh Alpha để ép phông nền ảo
                 rgb_fg = img_np[:, :, :3]
                 alpha = img_np[:, :, 3:4] / 255.0 
                 
-                # ÉP PHÔNG XÁM ẢO [128, 128, 128] CHỈ DÀNH CHO HIỂN THỊ
                 bg_color = np.full_like(rgb_fg, 128)
                 img_display = (rgb_fg * alpha + bg_color * (1 - alpha)).astype(np.uint8)
                 
@@ -316,21 +320,40 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         all_val_preds = torch.cat(all_val_preds, dim=0)
         all_val_masks = torch.cat(all_val_masks, dim=0)
+        
+        # Lấy metrics từ Torchmetrics (Validation)
         val_metrics = calculate_metrics_torchmetrics(all_val_preds, all_val_masks, num_classes=NUM_CLASSES)
+        val_macro_f1 = val_metrics['macro_f1']
+        val_mean_iou = val_metrics['mean_iou']
+        val_iou_bg = val_metrics['iou_background']
+        val_iou_fill = val_metrics['iou_fill']
+        val_iou_satin = val_metrics['iou_satin']
 
         scheduler.step()
 
+        # In log ra Terminal
         print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET (4 Channels):")
-        print(f"   Train | Loss: {avg_train_loss:.4f} | Macro F1: {train_metrics['macro_f1']:.4f}")
-        print(f"   Val   | Loss: {avg_val_loss:.4f} | Macro F1: {val_metrics['macro_f1']:.4f}")
+        print(f"   Train | Loss: {avg_train_loss:.4f} | Macro F1: {train_macro_f1:.4f} | Mean IoU: {train_mean_iou:.4f}")
+        print(f"          IoU - BG: {train_iou_bg:.4f} | Fill: {train_iou_fill:.4f} | Satin: {train_iou_satin:.4f}")
+        print(f"   Val   | Loss: {avg_val_loss:.4f} | Macro F1: {val_macro_f1:.4f} | Mean IoU: {val_mean_iou:.4f}")
+        print(f"          IoU - BG: {val_iou_bg:.4f} | Fill: {val_iou_fill:.4f} | Satin: {val_iou_satin:.4f}\n")
 
+        # Đẩy log lên WandB
         wandb.log({
             "epoch": epoch + 1, 
             "learning_rate": current_lr,
             "Loss/Train": avg_train_loss, 
             "Loss/Val": avg_val_loss,
-            "F1_Macro/Train": train_metrics['macro_f1'],
-            "F1_Macro/Val": val_metrics['macro_f1'],
+            "F1_Macro/Train": train_macro_f1,
+            "F1_Macro/Val": val_macro_f1,
+            "IoU_Mean/Train": train_mean_iou,
+            "IoU_Mean/Val": val_mean_iou,
+            "IoU_Background/Train": train_iou_bg,
+            "IoU_Background/Val": val_iou_bg,
+            "IoU_Fill/Train": train_iou_fill,
+            "IoU_Fill/Val": val_iou_fill,
+            "IoU_Satin/Train": train_iou_satin,
+            "IoU_Satin/Val": val_iou_satin,
             "Train_Images": train_wandb_images if len(train_rgb_samples) > 0 else None,
             "Validation_Images": wandb_log_images
         })
@@ -343,8 +366,8 @@ def main():
         }
         torch.save(checkpoint_last, LAST_CHECKPOINT_PATH)
 
-        if val_metrics['macro_f1'] > best_val_f1:
-            best_val_f1 = val_metrics['macro_f1']
+        if val_macro_f1 > best_val_f1:
+            best_val_f1 = val_macro_f1
             torch.save(model.state_dict(), BEST_MODEL_PATH)
             wandb.save(BEST_MODEL_PATH)
             epochs_no_improve = 0

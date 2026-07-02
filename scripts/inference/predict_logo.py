@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Embroidery Segmentation - Batch Inference Script
-Quét toàn bộ ảnh trong thư mục, đưa qua U2-Net và lưu kết quả hàng loạt.
+Quét toàn bộ ảnh trong thư mục, đưa qua U2-Net (4 Channels) và lưu kết quả hàng loạt.
 Đã đồng bộ kỹ thuật Global Context (Toàn cảnh) với quá trình Training (Size 768).
 """
 
@@ -17,7 +17,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # 1. ĐỊNH VỊ ĐƯỜNG DẪN DỰ ÁN
-# Lùi 3 cấp: predict.py -> inference -> scripts -> Embroidery_Segmentation
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -30,12 +29,12 @@ MODEL_WEIGHTS_PATH = os.path.join(PROJECT_ROOT, "checkpoints/logo/checkpoints_lo
 TEST_DIR = os.path.join(PROJECT_ROOT, "data/test/logo")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data/test/logo/predictions")
 
-# [ĐÃ SỬA LỖI]: BẮT BUỘC LÀ 768 ĐỂ ĐỒNG BỘ VỚI QUÁ TRÌNH TRAIN (KHÔNG LÀM TEO NÉT SATIN)
 IMAGE_SIZE = 768
 
 def load_testing_model(weights_path, device):
-    print(f"[*] Đang tải bộ não U2-Net (1 kênh vào, 3 kênh ra) - Kích thước {IMAGE_SIZE}x{IMAGE_SIZE}...")
-    model = U2NET(in_ch=1, out_ch=3)
+    print(f"[*] Đang tải bộ não U2-Net (4 kênh vào, 3 kênh ra) - Kích thước {IMAGE_SIZE}x{IMAGE_SIZE}...")
+    # CẬP NHẬT: in_ch=4 để nhận nguyên bản ảnh RGBA
+    model = U2NET(in_ch=4, out_ch=3) 
     
     if not os.path.exists(weights_path):
         print(f"LỖI: Không tìm thấy file trọng số tại {weights_path}")
@@ -71,7 +70,7 @@ def main():
         print(f"Thư mục {TEST_DIR} trống!")
         return
         
-    # TIỀN XỬ LÝ: Đồng bộ 100% với File Train (Chỉ bóp tỷ lệ & lót viền, không crop)
+    # TIỀN XỬ LÝ: PadIfNeeded với fill=0 trên ảnh RGBA sẽ tự động chèn pixel (0,0,0,0) - Transparent Black
     transform = A.Compose([
         A.LongestMaxSize(max_size=IMAGE_SIZE),
         A.PadIfNeeded(min_height=IMAGE_SIZE, min_width=IMAGE_SIZE, border_mode=cv2.BORDER_CONSTANT, fill=0),
@@ -79,47 +78,25 @@ def main():
     ])
     
     for img_path in tqdm(image_paths, desc="Dự đoán"):
-        # Đọc ảnh giữ nguyên Alpha channel
         img_rgba = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
         if img_rgba is None:
             continue
 
         orig_h, orig_w = img_rgba.shape[:2]
 
-        # --- ĐOẠN CODE ĐÃ ĐƯỢC NÂNG CẤP XỬ LÝ LOGO ĐEN ---
-        if img_rgba.ndim == 3 and img_rgba.shape[2] == 4:
-            img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
-            alpha_channel = img_rgba[:, :, 3]
+        # ĐẢM BẢO ẢNH LUÔN CÓ 4 KÊNH (RGBA) TRƯỚC KHI ĐƯA VÀO MODEL
+        if len(img_rgba.shape) == 2:
+            img_rgba = cv2.cvtColor(img_rgba, cv2.COLOR_GRAY2BGRA)
+        elif img_rgba.shape[2] == 3:
+            img_rgba = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2BGRA)
             
-            # 1. Chuyển sang Grayscale để lấy chi tiết nét vẽ bên trong
-            img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            
-            # 2. ÉP DẢI MÀU: Đảm bảo logo màu đen không bị chìm vào nền
-            img_gray_compressed = (img_gray.astype(np.float32) * (155.0 / 255.0)).astype(np.uint8)
-            alpha_base = (alpha_channel.astype(np.float32) * (100.0 / 255.0)).astype(np.uint8)
-            
-            # Hợp nhất: Nơi nào có Alpha > 0 sẽ được cộng thêm độ sáng nền
-            img_gray = cv2.add(img_gray_compressed, alpha_base)
-            
-            # 3. Ép phần nền trong suốt về 0 tuyệt đối
-            img_gray[alpha_channel == 0] = 0
-
-        elif img_rgba.ndim == 3:
-            img_bgr = img_rgba
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            img_gray = (255 - gray).astype(np.uint8)
-
-        else:
-            # Ảnh grayscale
-            img_gray = img_rgba
-            img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
-            img_gray = (255 - img_gray).astype(np.uint8)
-        # ---------------------------------------------
+        img_bgr = img_rgba[:, :, :3].copy() # Giữ lại RGB gốc để phục vụ tạo Overlay
         
         # 1. Transform ảnh bằng Albumentations
-        transformed = transform(image=img_gray)
+        transformed = transform(image=img_rgba)
         
         # 2. CHUẨN HÓA DỮ LIỆU (/ 255.0) VÀ ĐƯA LÊN GPU
+        # input_tensor giờ sẽ tự động mang shape (1, 4, H, W)
         input_tensor = transformed['image'].unsqueeze(0).float().to(device) / 255.0
         
         # 3. Suy luận
@@ -127,10 +104,9 @@ def main():
             outputs = model(input_tensor)
             pred_mask = torch.argmax(outputs[0], dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-        # 4. Hậu xử lý & Crop ngược phần viền đen để về đúng kích thước gốc
+        # 4. Hậu xử lý & Crop ngược phần viền trong suốt
         predicted_color_mask = color_code_mask(pred_mask)
         
-        # Tái tạo lại logic tính toán Padding của Albumentations để crop ngược
         scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
         new_h, new_w = int(orig_h * scale), int(orig_w * scale)
         pad_top = (IMAGE_SIZE - new_h) // 2
@@ -138,7 +114,6 @@ def main():
         
         crop_mask = predicted_color_mask[pad_top:pad_top+new_h, pad_left:pad_left+new_w]
         
-        # Dùng INTER_NEAREST để màu không bị lem (giữ nguyên nhãn)
         final_mask = cv2.resize(crop_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         overlay_img = cv2.addWeighted(img_bgr, 0.6, final_mask, 0.4, 0)
         
@@ -147,11 +122,16 @@ def main():
         cv2.imwrite(os.path.join(OUTPUT_DIR, f"{filename}_mask.png"), final_mask)
         cv2.imwrite(os.path.join(OUTPUT_DIR, f"{filename}_overlay.png"), overlay_img)
 
-        # 6. Lưu file Báo cáo trực quan (Visualization PNG)
+        # 6. Lưu file Báo cáo trực quan
+        # Ép phông nền hiển thị cho ảnh gốc tránh nền đen thui trên plot
+        bg_check = np.full_like(img_bgr, 128)
+        alpha = img_rgba[:, :, 3:4] / 255.0
+        img_display = (img_bgr * alpha + bg_check * (1 - alpha)).astype(np.uint8)
+
         fig = plt.figure(figsize=(12, 4))
         plt.subplot(1, 3, 1)
-        plt.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        plt.title("Ảnh gốc")
+        plt.imshow(cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB))
+        plt.title("Ảnh gốc (Nền xám)")
         plt.axis('off')
         
         plt.subplot(1, 3, 2)
@@ -166,7 +146,7 @@ def main():
         
         plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIR, f"{filename}_viz.png"), dpi=100, bbox_inches='tight')
-        plt.close(fig) # Đóng figure giải phóng RAM
+        plt.close(fig) 
         
     print(f"\nHOÀN THÀNH BATCH INFERENCE!")
     print(f"-> Đã xử lý xong {len(image_paths)} ảnh.")

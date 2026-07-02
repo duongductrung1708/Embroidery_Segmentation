@@ -7,53 +7,40 @@ import sys
 from pathlib import Path
 
 # Thêm đường dẫn gốc để import src
-# Lùi 3 cấp: predict_single_logo.py -> inference -> scripts -> Embroidery_Segmentation
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-# -------------------------
-
 from src.model import U2NET 
 
 # ==========================================
 # 1. CẤU HÌNH DỰ ĐOÁN LOGO 3 CLASS
 # ==========================================
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-
-# [QUAN TRỌNG NHẤT]: BẮT BUỘC PHẢI LÀ 768 ĐỂ ĐỒNG BỘ VỚI QUÁ TRÌNH TRAIN
 IMAGE_SIZE = 768 
+MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth" 
 
-MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth"  # File trọng số Logo của bạn
-
-# ---> Cấu hình đường dẫn cho 1 ẢNH DUY NHẤT ở đây <---
-SINGLE_IMAGE_PATH = "./data/test/logo/test1_logo.png" # SỬA TÊN FILE CỦA BẠN TẠI ĐÂY
+SINGLE_IMAGE_PATH = "./data/test/logo/test1_logo.png"
 OUTPUT_DIR = "./data/test/logo/predictions/"
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Khởi tạo U-2-Net (Bắt buộc in_ch=1, out_ch=3 đối với Logo)
-model = U2NET(in_ch=1, out_ch=3).to(DEVICE)
+# CẬP NHẬT: Khởi tạo U-2-Net (Bắt buộc in_ch=4 cho ảnh Transparent)
+model = U2NET(in_ch=4, out_ch=3).to(DEVICE)
 
 if os.path.exists(MODEL_PATH):
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
-    # Hỗ trợ cả file checkpoint đầy đủ hoặc chỉ weights
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
         model.load_state_dict(checkpoint)
         
     model.eval()
-    print(f"-> Da nap thanh cong bo nao AI LOGO (U-2-NET) - Size {IMAGE_SIZE}x{IMAGE_SIZE}!")
+    print(f"-> Da nap thanh cong bo nao AI LOGO (U-2-NET 4 Kênh) - Size {IMAGE_SIZE}x{IMAGE_SIZE}!")
 else:
     print(f"-> Khong tim thay file model '{MODEL_PATH}'. Ban da train xong chua?")
     exit()
 
 def process_image(img_path):
-    """
-    Hàm xử lý lõi Logo: 
-    Resize -> Padding -> AI Predict -> Crop ngược -> Đổ màu (Cyan/Magenta).
-    """
     # ==========================================
-    # BƯỚC 1: ĐỌC ẢNH VÀ CHUẨN BỊ CANVAS
+    # BƯỚC 1: ĐỌC ẢNH VÀ CHUẨN BỊ CANVAS (RGBA)
     # ==========================================
     img_rgba = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
     if img_rgba is None:
@@ -61,87 +48,60 @@ def process_image(img_path):
 
     orig_h, orig_w = img_rgba.shape[:2]
 
-    # --- ĐOẠN CODE ĐÃ ĐƯỢC NÂNG CẤP XỬ LÝ LOGO ĐEN ---
-    if len(img_rgba.shape) == 3 and img_rgba.shape[2] == 4:
-        # Tách ảnh màu (BGR) và kênh trong suốt (Alpha)
-        img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2BGR)
-        alpha_channel = img_rgba[:, :, 3]
-        
-        # 1. Chuyển sang Grayscale để lấy chi tiết nét vẽ bên trong
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        
-        # 2. ÉP DẢI MÀU: Đảm bảo logo màu đen không bị chìm vào nền
-        # Thu nhỏ chênh lệch Grayscale và cộng thêm 100 độ sáng vào vùng có logo
-        img_gray_compressed = (img_gray.astype(np.float32) * (155.0 / 255.0)).astype(np.uint8)
-        alpha_base = (alpha_channel.astype(np.float32) * (100.0 / 255.0)).astype(np.uint8)
-        
-        # Hợp nhất: Nơi nào có Alpha > 0 sẽ được cộng thêm độ sáng nền
-        input_image = cv2.add(img_gray_compressed, alpha_base)
-        
-        # 3. Ép phần nền trong suốt về 0 tuyệt đối
-        input_image[alpha_channel == 0] = 0
-        
-    else:
-        # Xử lý cho ảnh JPG không có nền trong suốt (Thường nền là màu trắng)
-        img_bgr = img_rgba if len(img_rgba.shape) == 3 else cv2.cvtColor(img_rgba, cv2.COLOR_GRAY2BGR)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        # Đảo ngược màu: Nền trắng (255) -> 0, Logo đen (0) -> 255
-        input_image = (255 - gray).astype(np.uint8) 
-    # ---------------------------------------------
+    # Đảm bảo 4 kênh
+    if len(img_rgba.shape) == 2:
+        img_rgba = cv2.cvtColor(img_rgba, cv2.COLOR_GRAY2BGRA)
+    elif img_rgba.shape[2] == 3:
+        img_rgba = cv2.cvtColor(img_rgba, cv2.COLOR_BGR2BGRA)
 
-    # Tính toán tỷ lệ để thu gọn cạnh dài nhất về chuẩn IMAGE_SIZE (768)
+    img_bgr = img_rgba[:, :, :3].copy() 
+
+    # Tính toán tỷ lệ
     scale = min(IMAGE_SIZE / orig_h, IMAGE_SIZE / orig_w)
     new_h, new_w = int(orig_h * scale), int(orig_w * scale)
     
-    # Dùng cv2.INTER_AREA khi thu nhỏ để giữ nguyên độ dày của pixel Satin
-    resized_input = cv2.resize(input_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    # Resize giữ nguyên 4 kênh
+    resized_input = cv2.resize(img_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
-    # Bọc thêm viền đen (Padding) để ảnh đạt đúng khung vuông 768x768
+    # Tính Padding
     pad_top = (IMAGE_SIZE - new_h) // 2
     pad_bottom = IMAGE_SIZE - new_h - pad_top
     pad_left = (IMAGE_SIZE - new_w) // 2
     pad_right = IMAGE_SIZE - new_w - pad_left
     
-    padded_input = cv2.copyMakeBorder(resized_input, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+    # Bọc thêm viền trong suốt [0, 0, 0, 0] bằng OpenCV
+    padded_input = cv2.copyMakeBorder(resized_input, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=[0, 0, 0, 0])
 
     # ==========================================
-    # BƯỚC 2: AI PHÂN TÍCH (U-2-NET)
+    # BƯỚC 2: AI PHÂN TÍCH
     # ==========================================
-    # Đưa ảnh uint8 (0-255) về Tensor float32 (0-1)
-    input_tensor = torch.tensor(padded_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0) / 255.0
+    # PyTorch yêu cầu (Channel, Height, Width)
+    padded_input = padded_input.transpose(2, 0, 1) 
+    
+    input_tensor = torch.tensor(padded_input, dtype=torch.float32).unsqueeze(0) / 255.0
     input_tensor = input_tensor.to(DEVICE)
     
     with torch.no_grad():
         outputs = model(input_tensor)
         final_output = outputs[0] 
-        
-        # Argmax để chọn lớp có xác suất cao nhất (0: Nền, 1: Fill, 2: Satin)
         pred_mask = torch.argmax(final_output, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
     # ==========================================
-    # BƯỚC 3: CẮT TỈA VÀ HIỂN THỊ (HẬU XỬ LÝ)
+    # BƯỚC 3: CẮT TỈA VÀ HIỂN THỊ
     # ==========================================
-    # Cắt bỏ cái viền đen đã đắp vào ở Bước 1
     crop_mask = pred_mask[pad_top:pad_top+new_h, pad_left:pad_left+new_w]
     
-    # Phóng to ảnh dự đoán về lại đúng số pixel nguyên bản của Logo
-    # Bắt buộc dùng INTER_NEAREST để các nhãn 0, 1, 2 không bị trộn lẫn (anti-aliasing)
     final_mask = cv2.resize(crop_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
-    # Đổ màu chuẩn: Lớp 1 (Fill) -> Cyan | Lớp 2 (Satin) -> Magenta
     color_mask = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-    color_mask[final_mask == 1] = [255, 255, 0]   # BGR của OpenCV: Cyan
-    color_mask[final_mask == 2] = [255, 0, 255]   # BGR của OpenCV: Magenta   
+    color_mask[final_mask == 1] = [255, 255, 0]   # Cyan
+    color_mask[final_mask == 2] = [255, 0, 255]   # Magenta   
     
-    # Tạo Overlay trộn 60% ảnh gốc, 40% Mask màu
     overlay_img = cv2.addWeighted(img_bgr, 0.6, color_mask, 0.4, 0)
 
-    return overlay_img, color_mask
+    return overlay_img, color_mask, img_rgba
 
 def single_image_inference(img_path, save_output=True):
-    """
-    Kích hoạt quá trình dự đoán và Render lên Matplotlib.
-    """
     if not os.path.exists(img_path):
         print(f"\n[LỖI] Khong tim thay anh tai duong dan: {img_path}")
         return
@@ -149,7 +109,7 @@ def single_image_inference(img_path, save_output=True):
     filename = os.path.basename(img_path)
     print(f"\n[*] Bat dau phan tich Logo: {filename}")
     
-    overlay_img, color_mask = process_image(img_path)
+    overlay_img, color_mask, img_rgba = process_image(img_path)
 
     if save_output:
         out_overlay = os.path.join(OUTPUT_DIR, f"overlay_{filename}")
@@ -157,20 +117,20 @@ def single_image_inference(img_path, save_output=True):
         
         cv2.imwrite(out_overlay, overlay_img)
         cv2.imwrite(out_mask, color_mask)
-        print(f"-> Da luu anh Overlay tai: {out_overlay}")
-        print(f"-> Da luu anh Mask tai: {out_mask}")
+        print(f"-> Da luu ket qua tai: {OUTPUT_DIR}")
 
-    # Giao diện Matplotlib trực quan (Chuyển BGR -> RGB)
     print("[*] Dang hien thi ket qua...")
-    img_bgr = cv2.imread(img_path)
-    if len(img_bgr.shape) == 3 and img_bgr.shape[2] == 4:
-        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+    
+    img_bgr = img_rgba[:, :, :3]
+    alpha = img_rgba[:, :, 3:4] / 255.0
+    bg_check = np.full_like(img_bgr, 128)
+    img_display = (img_bgr * alpha + bg_check * (1 - alpha)).astype(np.uint8)
     
     plt.figure(figsize=(15, 5))
     
     plt.subplot(1, 3, 1)
-    plt.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    plt.title("Anh Goc")
+    plt.imshow(cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB))
+    plt.title("Anh Goc (Lót nen xam)")
     plt.axis('off')
     
     plt.subplot(1, 3, 2)
