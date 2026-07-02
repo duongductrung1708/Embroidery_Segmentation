@@ -61,7 +61,7 @@ def main():
             num_holes_range=(4, 8), hole_height_range=(20, 60),
             hole_width_range=(20, 60), fill=0, p=0.3
         ),
-        A.GaussNoise(var_limit=(5.0, 20.0), p=0.3),
+        A.GaussNoise(std_range=(0.01, 0.02), p=0.3),
         A.GaussianBlur(blur_limit=(3, 5), p=0.2),
         ToTensorV2()
     ])
