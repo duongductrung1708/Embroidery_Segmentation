@@ -243,14 +243,19 @@ def main():
                 true_mask_np = train_mask_samples[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = train_pred_samples[i].cpu().numpy().astype(np.uint8)
                 
-                train_wandb_images.append(wandb.Image(
-                    rgb_np,
-                    caption=f"Train Input #{i+1} (Epoch {epoch+1})",
-                    masks={
-                        "ground_truth": {"mask_data": true_mask_np, "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}},
-                        "predictions": {"mask_data": pred_mask_np, "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}}
-                    }
-                ))
+                # Create colored masks for visualization
+                true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
+                pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
+                
+                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
+                true_mask_colored[true_mask_np == 1] = [0, 255, 255]
+                true_mask_colored[true_mask_np == 2] = [255, 0, 255]
+                pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
+                pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
+                
+                train_wandb_images.append(wandb.Image(rgb_np, caption=f"Train Input #{i+1}"))
+                train_wandb_images.append(wandb.Image(true_mask_colored, caption=f"Train GT #{i+1}"))
+                train_wandb_images.append(wandb.Image(pred_mask_colored, caption=f"Train Pred #{i+1}"))
 
         # --- PHA VALIDATION ---
         model.eval()
@@ -286,9 +291,9 @@ def main():
             wandb_log_images = []
             num_images = min(4, fixed_val_images.size(0))
             for i in range(num_images):
-                rgb_np = fixed_val_rgb[i].numpy() 
+                rgb_np = fixed_val_rgb[i].numpy()
                 
-                img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy() 
+                img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy()
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
                 else:
@@ -303,19 +308,19 @@ def main():
                 true_mask_np = fixed_val_masks[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = fixed_preds[i].cpu().numpy().astype(np.uint8)
                 
-                wandb_log_images.append(wandb.Image(
-                    rgb_np,  
-                    caption=f"Original SVG #{i+1} (Epoch {epoch+1})",
-                    masks={
-                        "ground_truth": {"mask_data": true_mask_np, "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}},
-                        "predictions": {"mask_data": pred_mask_np, "class_labels": {0: "Background", 1: "Fill", 2: "Satin"}}
-                    }
-                ))
+                # Create colored masks for visualization
+                true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
+                pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
                 
-                wandb_log_images.append(wandb.Image(
-                    img_display,
-                    caption=f"Model Input (RGBA on Gray) #{i+1} (Epoch {epoch+1})"
-                ))
+                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
+                true_mask_colored[true_mask_np == 1] = [0, 255, 255]
+                true_mask_colored[true_mask_np == 2] = [255, 0, 255]
+                pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
+                pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
+                
+                wandb_log_images.append(wandb.Image(rgb_np, caption=f"Val Input #{i+1}"))
+                wandb_log_images.append(wandb.Image(true_mask_colored, caption=f"Val GT #{i+1}"))
+                wandb_log_images.append(wandb.Image(pred_mask_colored, caption=f"Val Pred #{i+1}"))
 
         avg_val_loss = running_val_loss / len(val_loader)
         all_val_preds = torch.cat(all_val_preds, dim=0)
@@ -371,11 +376,14 @@ def main():
             torch.save(model.state_dict(), BEST_MODEL_PATH)
             wandb.save(BEST_MODEL_PATH)
             epochs_no_improve = 0
+            print(f"   *** NEW BEST MODEL: Val Macro F1 = {best_val_f1:.4f} ***")
         else:
             epochs_no_improve += 1
+            print(f"   F1 khong tang: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
 
         if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
             print(f"\nMO HINH DA HOI TU TAI EPOCH {epoch + 1}! Da kich hoat Dung Som.")
+            print(f"BEST VAL MACRO F1: {best_val_f1:.4f}")
             break
 
     wandb.finish() 
