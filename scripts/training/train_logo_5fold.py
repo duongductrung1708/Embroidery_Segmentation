@@ -10,7 +10,8 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
+import xml.etree.ElementTree as ET
 import shutil
 
 import albumentations as A
@@ -23,6 +24,45 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.dataset_svg import EmbroideryDatasetSVG
 from src.model import U2NET
 from src.utils_logo import GeneralizedDiceLoss, FocalLoss, get_boundary_mask, calculate_metrics_torchmetrics, seed_everything
+
+# SVG namespace for parsing
+SVG_NS = {"svg": "http://www.w3.org/2000/svg"}
+INKSCAPE_LABEL = "{http://www.inkscape.org/namespaces/inkscape}label"
+
+
+def count_satin_fill_paths(svg_path: Path) -> tuple:
+    """Count satin and fill paths in an SVG file."""
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+        
+        fill_count = 0
+        satin_count = 0
+        
+        for elem in root.findall(".//svg:path", SVG_NS):
+            label = elem.attrib.get(INKSCAPE_LABEL, "").strip().lower()
+            if label == "fill":
+                fill_count += 1
+            elif label == "satin":
+                satin_count += 1
+        
+        return fill_count, satin_count
+    except Exception as e:
+        print(f"Error parsing {svg_path}: {e}")
+        return 0, 0
+
+
+def calculate_satin_ratio(fill_count: int, satin_count: int) -> float:
+    """Calculate satin ratio (satin / total paths)."""
+    total = fill_count + satin_count
+    if total == 0:
+        return 0.0
+    return satin_count / total
+
+
+def bucket_satin_ratio(ratio: float, n_buckets: int = 4) -> int:
+    """Bucket satin ratio into discrete bins for stratification."""
+    return min(int(ratio * n_buckets), n_buckets - 1)
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -217,34 +257,13 @@ def validate_one_epoch(model, val_loader, device, focal_loss_fn, dice_loss_fn,
     }
 
 
-def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transform, val_transform, config, device, 
-                   checkpoint_dir, fold_name):
-    """Train one fold and return best validation metrics."""
-    
-    # Create wandb run for this fold
-    wandb.init(
-        project="embroidery-segmentation",
-        name=fold_name,
-        config={
-            "learning_rate": config.learning_rate,
-            "architecture": "U2-Net",
-            "dataset": "Logo_3Class_5Fold",
-            "epochs": config.epochs,
-            "batch_size": config.batch_size,
-            "image_size": config.image_size,
-            "num_classes": config.num_classes,
-            "input_channels": 4,
-            "fill_weight": config.fill_weight,
-            "satin_weight": config.satin_weight,
-            "supersample_factor": config.supersample_factor,
-            "fold": fold_idx + 1,
-            "n_folds": config.n_folds
-        }
-    )
+def train_one_fold(fold_idx, train_indices, val_indices, svg_files, train_transform, val_transform, config, device, 
+                   checkpoint_dir, wandb_run):
+    """Train one fold and return best validation metrics from best epoch."""
     
     # Create separate datasets for train and val with different transforms
     train_dataset = EmbroideryDatasetSVG(
-        svg_dir=svg_dir,
+        svg_dir_or_paths=[svg_files[i] for i in train_indices],
         transform=train_transform,
         crops_per_image=config.crops,
         augment_color=True,
@@ -253,7 +272,7 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
     )
     
     val_dataset = EmbroideryDatasetSVG(
-        svg_dir=svg_dir,
+        svg_dir_or_paths=[svg_files[i] for i in val_indices],
         transform=val_transform,
         crops_per_image=config.crops,
         augment_color=False,
@@ -261,24 +280,21 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
         supersample_factor=config.supersample_factor
     )
     
-    # Create subsets for this fold
-    train_subset = Subset(train_dataset, train_indices)
-    val_subset = Subset(val_dataset, val_indices)
-    
     # Create dataloaders
-    train_loader = DataLoader(train_subset, batch_size=config.batch_size, shuffle=True, 
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, 
                              num_workers=4, persistent_workers=True)
-    val_loader = DataLoader(val_subset, batch_size=config.batch_size, shuffle=False,
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False,
                            num_workers=4, persistent_workers=True)
     
-    # Create tracking dataset for visualization (use val subset)
-    tracking_loader = DataLoader(val_subset, batch_size=config.batch_size, shuffle=False)
+    # Create tracking dataset for visualization (use val dataset)
+    tracking_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+    
     
     print(f"\n{'='*60}")
     print(f"FOLD {fold_idx + 1}/{config.n_folds}")
     print(f"{'='*60}")
-    print(f"Train samples: {len(train_subset)}")
-    print(f"Val samples: {len(val_subset)}")
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Val samples: {len(val_dataset)}")
     
     # Get fixed batch for visualization
     fixed_val_batch = next(iter(tracking_loader))
@@ -297,10 +313,9 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
     scaler = GradScaler(device.type)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
     
-    # Checkpoint paths
-    fold_checkpoint_path = os.path.join(checkpoint_dir, f"fold{fold_idx+1}_best.pth")
-    
     best_val_f1 = 0.0
+    best_epoch_metrics = None
+    best_model_state = None
     epochs_no_improve = 0
     EARLY_STOPPING_PATIENCE = 100
     
@@ -328,8 +343,9 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
         print(f"   Val   | Loss: {val_metrics['loss']:.4f} | Macro F1: {val_metrics['macro_f1']:.4f} | Mean IoU: {val_metrics['mean_iou']:.4f}")
         print(f"          IoU - BG: {val_metrics['iou_bg']:.4f} | Fill: {val_metrics['iou_fill']:.4f} | Satin: {val_metrics['iou_satin']:.4f}")
         
-        # Log to wandb
-        wandb.log({
+        # Log to wandb with fold field
+        wandb_run.log({
+            "fold": fold_idx + 1,
             "epoch": epoch + 1,
             "learning_rate": optimizer.param_groups[0]['lr'],
             "Loss/Train": train_metrics['loss'],
@@ -348,11 +364,12 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
             "Validation_Images": val_metrics['wandb_images']
         })
         
-        # Save best model
+        
+        # Save best model and metrics
         if val_metrics['macro_f1'] > best_val_f1:
             best_val_f1 = val_metrics['macro_f1']
-            torch.save(model.state_dict(), fold_checkpoint_path)
-            wandb.save(fold_checkpoint_path)
+            best_epoch_metrics = val_metrics.copy()
+            best_model_state = model.state_dict().copy()
             epochs_no_improve = 0
             print(f"   *** NEW BEST MODEL: Val Macro F1 = {best_val_f1:.4f} ***")
         else:
@@ -365,15 +382,8 @@ def train_one_fold(fold_idx, train_indices, val_indices, svg_dir, train_transfor
             print(f"Best Val Macro F1: {best_val_f1:.4f}")
             break
     
-    wandb.finish()
-    
-    return {
-        'macro_f1': best_val_f1,
-        'mean_iou': val_metrics['mean_iou'],
-        'iou_bg': val_metrics['iou_bg'],
-        'iou_fill': val_metrics['iou_fill'],
-        'iou_satin': val_metrics['iou_satin']
-    }
+    # Return metrics from best epoch and best model state
+    return best_epoch_metrics if best_epoch_metrics else val_metrics, best_model_state
 
 
 def main():
@@ -440,7 +450,7 @@ def main():
     ])
     
     # ==========================================
-    # LOAD ALL SVG FILES
+    # LOAD ALL SVG FILES AND CALCULATE SATIN RATIOS
     # ==========================================
     all_svg_files = []
     for source_dir in config.source_dirs:
@@ -456,36 +466,25 @@ def main():
         print("No SVG files found!")
         return
     
-    # ==========================================
-    # CREATE FULL DATASET (without specific folder)
-    # ==========================================
-    # We need to modify EmbroideryDatasetSVG to accept a list of SVG files
-    # For now, we'll copy files to a temporary directory
-    temp_dir = os.path.join(PROJECT_ROOT, "data/logo/temp_all")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Clear temp directory
-    for f in Path(temp_dir).glob("*.svg"):
-        f.unlink()
-    
-    # Copy all files to temp directory
+    # Calculate satin ratios for stratification
+    print("\nCalculating satin ratios for stratification...")
+    satin_ratios = []
     for svg_file in all_svg_files:
-        shutil.copy2(svg_file, os.path.join(temp_dir, svg_file.name))
+        fill_count, satin_count = count_satin_fill_paths(svg_file)
+        ratio = calculate_satin_ratio(fill_count, satin_count)
+        satin_ratios.append(ratio)
     
-    print(f"Copied {len(all_svg_files)} files to {temp_dir}")
+    # Bucket satin ratios for StratifiedKFold
+    n_buckets = 4
+    satin_ratio_buckets = [bucket_satin_ratio(r, n_buckets) for r in satin_ratios]
     
-    # Create dataset with transforms (we'll use val_transform for base dataset)
-    full_dataset = EmbroideryDatasetSVG(
-        svg_dir=temp_dir,
-        transform=val_transform,
-        crops_per_image=config.crops,
-        augment_color=False,
-        target_size=config.image_size,
-        supersample_factor=config.supersample_factor
-    )
+    print(f"Satin ratio distribution:")
+    for i in range(n_buckets):
+        count = satin_ratio_buckets.count(i)
+        print(f"  Bucket {i}: {count} files ({count/len(all_svg_files)*100:.1f}%)")
     
     # ==========================================
-    # 5-FOLD CROSS VALIDATION
+    # 5-FOLD CROSS VALIDATION WITH STRATIFICATION
     # ==========================================
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     print(f"\nUsing device: {device}")
@@ -493,24 +492,56 @@ def main():
     checkpoint_dir = os.path.join(PROJECT_ROOT, "checkpoints/logo")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # Create KFold splitter
-    kfold = KFold(n_splits=config.n_folds, shuffle=True, random_state=42)
+    # Create StratifiedKFold splitter based on satin ratio buckets
+    skf = StratifiedKFold(n_splits=config.n_folds, shuffle=True, random_state=42)
+    
+    # ==========================================
+    # INITIALIZE SINGLE WANDB RUN
+    # ==========================================
+    wandb.init(
+        project="embroidery-segmentation",
+        name="logo-5fold-stratified",
+        config={
+            "learning_rate": config.learning_rate,
+            "architecture": "U2-Net",
+            "dataset": "Logo_3Class_5Fold_Stratified",
+            "epochs": config.epochs,
+            "batch_size": config.batch_size,
+            "image_size": config.image_size,
+            "num_classes": config.num_classes,
+            "input_channels": 4,
+            "fill_weight": config.fill_weight,
+            "satin_weight": config.satin_weight,
+            "supersample_factor": config.supersample_factor,
+            "n_folds": config.n_folds,
+            "stratification": "satin_ratio_buckets"
+        }
+    )
     
     # Store results for each fold
     fold_results = []
+    best_overall_f1 = 0.0
+    best_overall_model_state = None
     
     # Train each fold
-    for fold_idx, (train_indices, val_indices) in enumerate(kfold.split(range(len(all_svg_files)))):
-        fold_name = f"logo-fold{fold_idx+1}"
+    for fold_idx, (train_indices, val_indices) in enumerate(skf.split(range(len(all_svg_files)), satin_ratio_buckets)):
+        print(f"\n{'='*60}")
+        print(f"Starting Fold {fold_idx + 1}/{config.n_folds}")
+        print(f"{'='*60}")
         
         # Train this fold
-        fold_result = train_one_fold(
-            fold_idx, train_indices, val_indices, temp_dir, train_transform, val_transform, config, device,
-            checkpoint_dir, fold_name
+        fold_result, fold_model_state = train_one_fold(
+            fold_idx, train_indices, val_indices, all_svg_files, train_transform, val_transform, config, device,
+            checkpoint_dir, wandb.run
         )
         
         fold_results.append(fold_result)
         print(f"\nFold {fold_idx+1} completed. Best Val Macro F1: {fold_result['macro_f1']:.4f}")
+        
+        # Track best overall model
+        if fold_result['macro_f1'] > best_overall_f1:
+            best_overall_f1 = fold_result['macro_f1']
+            best_overall_model_state = fold_model_state
     
     # ==========================================
     # CALCULATE FINAL RESULTS
@@ -542,18 +573,18 @@ def main():
     print(f"  Mean ± Std: {np.mean(iou_satins):.4f} ± {np.std(iou_satins):.4f}")
     
     # ==========================================
-    # COPY BEST OVERALL MODEL
+    # SAVE BEST OVERALL MODEL
     # ==========================================
-    best_fold_idx = np.argmax(macro_f1s)
-    best_fold_path = os.path.join(checkpoint_dir, f"fold{best_fold_idx+1}_best.pth")
     best_overall_path = os.path.join(checkpoint_dir, "best_overall.pth")
     
-    shutil.copy2(best_fold_path, best_overall_path)
-    print(f"\nBest overall model (Fold {best_fold_idx+1}) copied to: {best_overall_path}")
+    if best_overall_model_state is not None:
+        torch.save(best_overall_model_state, best_overall_path)
+        wandb.save(best_overall_path)
+        print(f"\nBest overall model saved to: {best_overall_path}")
+    else:
+        print("\nWarning: No best model state found. Skipping save.")
     
-    # Clean up temp directory
-    shutil.rmtree(temp_dir)
-    print(f"Cleaned up temporary directory: {temp_dir}")
+    wandb.finish()
 
 
 if __name__ == "__main__":

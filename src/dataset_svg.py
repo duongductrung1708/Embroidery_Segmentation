@@ -181,9 +181,16 @@ def get_svg_dimensions(svg_path: str) -> Tuple[int, int]:
     return 512, 512
 
 class EmbroideryDatasetSVG(Dataset):
-    def __init__(self, svg_dir, transform=None, crops_per_image=1, augment_color=True,
+    def __init__(self, svg_dir_or_paths, transform=None, crops_per_image=1, augment_color=True,
                  target_size=512, cache_in_memory=True, supersample_factor=1):
-        self.svg_paths = sorted(glob.glob(f"{svg_dir}/*.svg"))
+        # Accept either a directory string or a list of Path objects
+        if isinstance(svg_dir_or_paths, str):
+            self.svg_paths = sorted(glob.glob(f"{svg_dir_or_paths}/*.svg"))
+        elif isinstance(svg_dir_or_paths, list):
+            self.svg_paths = [str(p) for p in svg_dir_or_paths]
+        else:
+            raise ValueError("svg_dir_or_paths must be either a string (directory) or a list of Path objects")
+        
         self.transform = transform
         self.augment_color = augment_color
         self.target_size = target_size
