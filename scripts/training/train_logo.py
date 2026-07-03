@@ -30,12 +30,34 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768
     TEMP_CROPS = 1
-    BATCH_SIZE = 2
+    BATCH_SIZE = 4
     NUM_CLASSES = 3
+
+    # ==========================================
+    # QUY TẮC NỘI SUY (interpolation):
+    #   - ẢNH (RGBA, giá trị liên tục 0-255)  -> INTER_LINEAR
+    #     Cho phép pha trộn màu giữa các pixel lân cận khi xoay/scale,
+    #     giữ được cạnh mượt thay vì răng cưa.
+    #   - MASK (nhãn rời rạc 0=BG, 1=Fill, 2=Satin) -> INTER_NEAREST BẮT BUỘC
+    #     Không được nội suy tuyến tính, vì trung bình cộng của 2 class index
+    #     (ví dụ (1+2)/2 = 1.5) không phải 1 nhãn hợp lệ nào cả -> sẽ tạo ra
+    #     "nhãn ma" ở biên giữa Fill/Satin, làm hỏng ground truth.
+    #
+    # Albumentations 2.x đã tách sẵn 2 tham số interpolation/mask_interpolation
+    # cho các transform resize/affine, với mask_interpolation mặc định là
+    # INTER_NEAREST. Ở đây set TƯỜNG MINH cả 2 để không phụ thuộc default
+    # ngầm (phòng khi nâng cấp lib sau này đổi default).
+    # ==========================================
+    IMG_INTERPOLATION = cv2.INTER_LINEAR
+    MASK_INTERPOLATION = cv2.INTER_NEAREST
 
     # Lưu ý: A.PadIfNeeded với fill=0 trên ảnh RGBA sẽ chèn padding là (0,0,0,0) - tức là viền trong suốt
     train_transform = A.Compose([
-        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.LongestMaxSize(
+            max_size=TEMP_IMAGE_SIZE,
+            interpolation=IMG_INTERPOLATION,
+            mask_interpolation=MASK_INTERPOLATION,
+        ),
         A.PadIfNeeded(
             min_height=TEMP_IMAGE_SIZE,
             min_width=TEMP_IMAGE_SIZE,
@@ -49,7 +71,8 @@ def main():
             translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
             scale=(0.85, 1.15),
             rotate=(-30, 30),
-            interpolation=cv2.INTER_NEAREST,
+            interpolation=IMG_INTERPOLATION,
+            mask_interpolation=MASK_INTERPOLATION,
             border_mode=cv2.BORDER_CONSTANT,
             fill=0,
             fill_mask=0,
@@ -67,7 +90,11 @@ def main():
     ])
 
     val_transform = A.Compose([
-        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.LongestMaxSize(
+            max_size=TEMP_IMAGE_SIZE,
+            interpolation=IMG_INTERPOLATION,
+            mask_interpolation=MASK_INTERPOLATION,
+        ),
         A.PadIfNeeded(
             min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0
@@ -76,7 +103,11 @@ def main():
     ])
 
     tracking_transform = A.Compose([
-        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE),
+        A.LongestMaxSize(
+            max_size=TEMP_IMAGE_SIZE,
+            interpolation=IMG_INTERPOLATION,
+            mask_interpolation=MASK_INTERPOLATION,
+        ),
         A.PadIfNeeded(
             min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, 
             border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0
@@ -91,8 +122,8 @@ def main():
     val_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
     tracking_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=32, persistent_workers=True, pin_memory = True, prefetch_factor = 4)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=16, persistent_workers=True, pin_memory = True, prefetch_factor = 2) 
     tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
