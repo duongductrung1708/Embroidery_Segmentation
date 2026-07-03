@@ -369,14 +369,35 @@ python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/ima
 
 **2. train_logo.py - Dataset Logo (3-class)**
 
-- Dataset: `data/logo/train/images`, `data/logo/train/masks`
-- Model: `U2NET(in_ch=1, out_ch=3)`
+- Dataset: `data/logo/train_svg`, `data/logo/val_svg`
+- Dataset loader: `EmbroideryDatasetSVG` render SVG trực tiếp thành ảnh RGBA và mask 3 lớp
+- Model: `U2NET(in_ch=4, out_ch=3)`
 - Labels: 0=background, 1=fill, 2=satin
 - Checkpoint: `checkpoints/logo/u2net_logo_last.pth`, `checkpoints/logo/u2net_logo_best.pth`
-- Sử dụng: `dataset_logo.py`, `utils_logo.py`
+- Sử dụng: `dataset_svg.py`, `utils_logo.py`
 - Resolution: 768 (tăng từ 512)
-- Batch size: 2 (với Mixed Precision)
+- Batch size thật: 2 (Mixed Precision)
+- Effective batch size: 4 bằng gradient accumulation 2 bước
 - Metrics: torchmetrics (Macro F1, Per-class IoU)
+
+### Quy tắc Label Fill/Satin cho Logo
+
+Nguồn nhãn cuối cùng khi train logo nằm ở `src/dataset_svg.py::build_hybrid_metadata`.
+
+Thứ tự ưu tiên:
+
+1. Nếu path đã có `inkscape:label="fill"` hoặc `inkscape:label="satin"` từ bước convert/manual thì train dùng trực tiếp label đó.
+2. Nếu toàn bộ SVG đã có label hợp lệ, train bỏ qua hoàn toàn fallback rule để tránh render/skeleton geometry thừa.
+3. Nếu path thiếu label, train fallback bằng `build_convert_rule_metadata()` trong `src/svg_path_classifier.py`, mô phỏng cùng rule với `scripts/data_prep/convert_single_svg.py`.
+
+Rule fallback tương thích convert:
+
+- Outer border rỗng, đủ mỏng (`thickness <= 8mm`) -> `satin`
+- Hollow path: dày `>= 2mm` -> `fill`, mỏng hơn -> `satin`
+- Path solidity thấp và mỏng -> `satin`
+- Path dài/hẹp (`aspect_ratio > 4`) và `thickness <= 4mm` -> `satin`
+- Khối đặc lớn và dày `>= 2mm` -> `fill`
+- Fallback cuối theo ngưỡng thickness `2mm`
 
 ### Cải tiến Training (v8)
 
@@ -424,9 +445,12 @@ python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/ima
 
 **Mixed Precision Training:**
 
-- Sử dụng `torch.cuda.amp.autocast` và `GradScaler`
+- Sử dụng `torch.autocast(device_type=device.type)` và `GradScaler`
 - Giảm VRAM ~35-50% để train ở resolution cao hơn (768)
-- Giảm batch size từ 4 → 2 để tránh OOM
+- Giảm batch size thật từ 4 → 2 để tránh OOM trên RTX 3060 12GB
+- Dùng gradient accumulation 2 bước để giữ effective batch size = 4
+- Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` trước khi import torch để giảm phân mảnh CUDA
+- DataLoader worker tự động theo kích thước dataset: train tối đa 8, val tối đa 4, không vượt quá số sample
 
 ### Chạy Training
 

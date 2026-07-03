@@ -25,7 +25,7 @@ from src.model import U2NET
 # ==========================================
 # CẤU HÌNH CÁC THAM SỐ
 # ==========================================
-MODEL_WEIGHTS_PATH = os.path.join(PROJECT_ROOT, "checkpoints/logo/logo_best_overall.pth") 
+MODEL_WEIGHTS_PATH = os.path.join(PROJECT_ROOT, "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth") 
 TEST_DIR = os.path.join(PROJECT_ROOT, "data/test/logo")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "data/test/logo/predictions")
 

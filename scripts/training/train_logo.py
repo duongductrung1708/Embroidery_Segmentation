@@ -89,8 +89,8 @@ def main():
             fill_mask=0,
             p=0.7
         ),
-        # A.ElasticTransform(alpha=120, sigma=6, p=0.3),
-        # A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+        A.ElasticTransform(alpha=120, sigma=6, p=0.3),
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
         A.CoarseDropout(
             num_holes_range=(4, 8), hole_height_range=(10, 30),
             hole_width_range=(10, 30), fill=0, p=0.3
@@ -154,7 +154,7 @@ def main():
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
             "dataset": "Logo_3Class_V2",
-            "epochs": 50,
+            "epochs": 100,
             "batch_size": BATCH_SIZE,
             "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
             "grad_accum_steps": GRAD_ACCUM_STEPS,
