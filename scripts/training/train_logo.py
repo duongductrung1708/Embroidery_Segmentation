@@ -1,3 +1,7 @@
+import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,7 +9,6 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler
 from tqdm import tqdm
 import wandb
-import os
 import sys
 import cv2
 import numpy as np
@@ -36,7 +39,9 @@ def main():
     # ==========================================
     TEMP_IMAGE_SIZE = 768
     TEMP_CROPS = 1
-    BATCH_SIZE = 4
+    BATCH_SIZE = 2
+    EFFECTIVE_BATCH_SIZE = 4
+    GRAD_ACCUM_STEPS = max(1, EFFECTIVE_BATCH_SIZE // BATCH_SIZE)
     NUM_CLASSES = 3
 
     # ==========================================
@@ -151,6 +156,8 @@ def main():
             "dataset": "Logo_3Class_V2",
             "epochs": 50,
             "batch_size": BATCH_SIZE,
+            "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
+            "grad_accum_steps": GRAD_ACCUM_STEPS,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
             "input_channels": 4, # Ghi chú cấu hình 4 kênh
@@ -225,10 +232,10 @@ def main():
         train_pred_samples = []
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
+        optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (images, masks, rgb_images) in enumerate(loop):
             images, masks = images.to(device), masks.to(device)
-            optimizer.zero_grad()
             
             if batch_idx == 0:
                 train_rgb_samples = rgb_images[:min(4, rgb_images.size(0))]
@@ -249,12 +256,17 @@ def main():
                     boundary_loss += bce_boundary_fn(outputs[0][:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
                 boundary_loss /= NUM_CLASSES
                 loss += 0.5 * boundary_loss
-            
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
 
             running_train_loss += loss.item()
+            loss_for_backward = loss / GRAD_ACCUM_STEPS
+            scaler.scale(loss_for_backward).backward()
+
+            should_step = ((batch_idx + 1) % GRAD_ACCUM_STEPS == 0) or ((batch_idx + 1) == len(train_loader))
+            if should_step:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
             current_lr = optimizer.param_groups[0]['lr']
             loop.set_postfix(loss=loss.item(), lr=current_lr)
             
