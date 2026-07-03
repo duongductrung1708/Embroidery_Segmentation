@@ -559,6 +559,107 @@ def classify_svg_file(svg_path: str, output_mask_path: Optional[str] = None,
 # ---------------------------------------------------------------------------
 # Tích hợp với pipeline train (dataset_svg.py)
 # ---------------------------------------------------------------------------
+def _classify_with_convert_rule(path_obj: SVGPath, outer_border_id: Optional[str],
+                                canvas_area: float, svg_width: int, svg_height: int,
+                                physical_width_mm: float,
+                                threshold_mm: float) -> str:
+    """
+    Rule tương thích với scripts/data_prep/convert_single_svg.py:
+    ưu tiên cùng cách gán satin/fill tại bước convert PNG -> SVG.
+    """
+    geom = path_obj.geometry
+    if geom is None or geom.is_empty:
+        return "fill"
+
+    area_px = geom.area
+    hull_area_px = geom.convex_hull.area
+    solidity = area_px / hull_area_px if hull_area_px > 0 else 1.0
+
+    min_x, min_y, max_x, max_y = geom.bounds
+    w, h = max_x - min_x, max_y - min_y
+    aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 100.0
+
+    is_hollow = any(len(poly.interiors) > 0 for poly in _iter_polygons(geom))
+
+    path_mask = render_path_to_mask(path_obj.element, svg_width, svg_height,
+                                    supersample_factor=1)
+    thickness_mm = 0.0
+    if path_mask is not None and path_mask.sum() > 0:
+        pixel_to_mm = physical_width_mm / max(float(svg_width), 1.0)
+        dist = cv2.distanceTransform(path_mask.astype(np.uint8), cv2.DIST_L2, 5)
+        try:
+            skeleton = skeletonize(path_mask.astype(bool))
+            skeleton_distances = dist[np.where(skeleton)]
+            if len(skeleton_distances) > 0:
+                median_dist = np.median(skeleton_distances)
+                thickness_mm = (median_dist * 2.0) * pixel_to_mm
+            else:
+                thickness_mm = (np.max(dist) * 2.0) * pixel_to_mm
+        except Exception:
+            thickness_mm = (np.max(dist) * 2.0) * pixel_to_mm
+
+    is_outermost = (
+        path_obj.id == outer_border_id
+        and canvas_area > 0
+        and (hull_area_px / canvas_area) > 0.4
+    )
+
+    if is_outermost and is_hollow and thickness_mm <= 8.0:
+        return "satin"
+    if is_hollow:
+        return "fill" if thickness_mm >= threshold_mm else "satin"
+    if solidity < 0.65 and thickness_mm < (threshold_mm * 1.5):
+        return "satin"
+    if aspect_ratio > 4.0 and thickness_mm <= 4.0:
+        return "satin"
+    if solidity > 0.85 and thickness_mm >= threshold_mm:
+        return "fill"
+    return "satin" if thickness_mm < threshold_mm else "fill"
+
+
+def build_convert_rule_metadata(svg_path: str, physical_width_mm: float = 80.0,
+                                threshold_mm: float = 2.0) -> Dict[str, str]:
+    """
+    Trả về {path_id: "satin"/"fill"} theo cùng rule với bước convert PNG -> SVG.
+
+    Dùng cho training fallback khi path chưa có inkscape:label. Nếu SVG đã được
+    convert bằng convert_single_svg.py thì label có sẵn vẫn là nguồn đúng nhất;
+    hàm này chỉ đảm bảo path thiếu label không bị rơi sang bộ rule khác.
+    """
+    root, paths, _ = load_svg(svg_path)
+    if not paths:
+        return {}
+
+    svg_width, svg_height = get_svg_dimensions(svg_path)
+    canvas_area = float(svg_width * svg_height)
+
+    max_hull_area = 0.0
+    outer_border_id = None
+    for pid, path_obj in paths.items():
+        geom = render_path_to_polygon(path_obj.element)
+        if geom is None or geom.is_empty:
+            continue
+        path_obj.geometry = geom
+        hull_area = geom.convex_hull.area
+        if hull_area > max_hull_area:
+            max_hull_area = hull_area
+            outer_border_id = pid
+
+    metadata: Dict[str, str] = {}
+    for pid, path_obj in paths.items():
+        metadata[pid] = _classify_with_convert_rule(
+            path_obj,
+            outer_border_id=outer_border_id,
+            canvas_area=canvas_area,
+            svg_width=svg_width,
+            svg_height=svg_height,
+            physical_width_mm=physical_width_mm,
+            threshold_mm=threshold_mm,
+        )
+
+    return metadata
+
+
 def build_geometric_metadata(svg_path: str, supersample_factor: int = 2) -> Dict[str, str]:
     """
     Trả về {path_id: "satin"/"fill"} dựa HOÀN TOÀN trên hình học (rule cứng

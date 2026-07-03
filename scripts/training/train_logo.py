@@ -22,6 +22,12 @@ from src.dataset_svg import EmbroideryDatasetSVG
 from src.model import U2NET 
 from src.utils_logo import GeneralizedDiceLoss, FocalLoss, get_boundary_mask, calculate_metrics_torchmetrics, seed_everything
 
+
+def _loader_workers(dataset_len: int, cap: int) -> int:
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(cap, cpu_count, dataset_len))
+
+
 def main():
     seed_everything(42)
 
@@ -122,12 +128,16 @@ def main():
     val_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
     tracking_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=32, persistent_workers=True, pin_memory = True, prefetch_factor = 4)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=16, persistent_workers=True, pin_memory = True, prefetch_factor = 2) 
+    train_workers = _loader_workers(len(train_dataset), cap=8)
+    val_workers = _loader_workers(len(val_dataset), cap=4)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=train_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=val_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
     tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
     print(f"Number of validation images (Full Scale): {len(val_dataset)}")
+    print(f"DataLoader workers: train={train_workers}, val={val_workers}")
 
     # ==========================================
     # 3. KHỞI TẠO WANDB & THIẾT BỊ

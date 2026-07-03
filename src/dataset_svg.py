@@ -22,15 +22,15 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "cairosvg"])
     import cairosvg
 
-# Bộ phân loại hình học (rule cứng: outer boundary / ring / width) dùng để
-# tự động sinh nhãn satin/fill cho các path CHƯA được gán label thủ công.
+# Bộ phân loại fallback dùng cùng rule với bước convert PNG -> SVG để tự động
+# sinh nhãn satin/fill cho các path CHƯA được gán label thủ công.
 try:
-    from src.svg_path_classifier import build_geometric_metadata
+    from src.svg_path_classifier import build_convert_rule_metadata
 except ImportError:
     try:
-        from .svg_path_classifier import build_geometric_metadata
+        from .svg_path_classifier import build_convert_rule_metadata
     except ImportError:
-        from svg_path_classifier import build_geometric_metadata
+        from svg_path_classifier import build_convert_rule_metadata
 
 SATIN_COLORS = [
     "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF",
@@ -105,27 +105,33 @@ def build_hybrid_metadata(svg_path: str) -> Dict[str, str]:
     Nguồn nhãn cuối cùng dùng để train, theo thứ tự ưu tiên:
 
     1. Label Inkscape thủ công ('satin'/'fill') nếu path đã được gán rõ ràng.
-    2. Nếu chưa gán (hoặc file không có label nào) -> suy ra bằng RULE CỨNG
-       hình học (svg_path_classifier.build_geometric_metadata):
-         - path bám viền ngoài cùng logo -> satin
-         - path dạng khung/viền mỏng (ring) bao quanh path khác -> satin
-         - width <= 2cm -> satin, width > 2cm -> fill
+    2. Nếu chưa gán (hoặc file không có label nào) -> suy ra bằng rule cùng
+       logic với bước convert PNG -> SVG (convert_single_svg.py):
+         - outer border rỗng, đủ mỏng -> satin
+         - hollow path: dày >= 2mm -> fill, mỏng hơn -> satin
+         - path solidity thấp và mỏng -> satin
+         - path dài/hẹp và <= 4mm -> satin
+         - khối đặc lớn và dày >= 2mm -> fill
+         - fallback theo thickness 2mm
 
-    Luôn tính rule hình học cho TOÀN BỘ path trước (baseline), sau đó ghi
+    Luôn tính rule convert fallback cho TOÀN BỘ path trước (baseline), sau đó ghi
     đè bằng label thủ công ở những path đã có label -- để 1 file SVG có
-    thể trộn lẫn: vài path gán tay cho chắc, phần còn lại để hình học tự lo.
+    thể trộn lẫn: vài path gán tay/convert cho chắc, phần còn lại để rule
+    convert tự lo.
     """
-    try:
-        geometric_metadata = build_geometric_metadata(svg_path)
-    except Exception as e:
-        print(f"[WARNING] Khong the phan loai hinh hoc cho {svg_path}: {e}. "
-              f"Fallback: moi path chua gan nhan -> 'fill'.")
-        geometric_metadata = {}
-
     _, manual_metadata = parse_svg_metadata_raw(svg_path)
+    if manual_metadata and all(label is not None for label in manual_metadata.values()):
+        return {path_id: label for path_id, label in manual_metadata.items() if label is not None}
+
+    try:
+        fallback_metadata = build_convert_rule_metadata(svg_path)
+    except Exception as e:
+        print(f"[WARNING] Khong the phan loai bang rule convert cho {svg_path}: {e}. "
+              f"Fallback: moi path chua gan nhan -> 'fill'.")
+        fallback_metadata = {}
 
     # Baseline: hợp toàn bộ path_id xuất hiện ở 1 trong 2 nguồn
-    all_ids = set(geometric_metadata.keys()) | set(manual_metadata.keys())
+    all_ids = set(fallback_metadata.keys()) | set(manual_metadata.keys())
 
     metadata: Dict[str, str] = {}
     for path_id in all_ids:
@@ -133,7 +139,7 @@ def build_hybrid_metadata(svg_path: str) -> Dict[str, str]:
         if manual_label is not None:
             metadata[path_id] = manual_label
         else:
-            metadata[path_id] = geometric_metadata.get(path_id, "fill")
+            metadata[path_id] = fallback_metadata.get(path_id, "fill")
 
     return metadata
 
