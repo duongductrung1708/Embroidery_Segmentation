@@ -30,12 +30,25 @@ def _loader_workers(dataset_len: int, cap: int) -> int:
     cpu_count = os.cpu_count() or 1
     return max(1, min(cap, cpu_count, dataset_len))
 
+# ==========================================
+# HÀM HỖ TRỢ TÔ MÀU MASK CHO WANDB
+# ==========================================
+def colorize_mask(mask_np):
+    """
+    Nhận vào mảng numpy 2D (chứa nhãn 0, 1, 2)
+    Trả về ảnh màu RGB: Cyan cho Fill (1), Magenta cho Satin (2)
+    """
+    color_mask = np.zeros((mask_np.shape[0], mask_np.shape[1], 3), dtype=np.uint8)
+    color_mask[mask_np == 1] = [0, 255, 255]
+    color_mask[mask_np == 2] = [255, 0, 255]
+    return color_mask
+
 
 def main():
     seed_everything(42)
 
     # ==========================================
-    # 1. CẤU HÌNH HỆ THỐNG
+    # 1. CỐ HÌNH HỆ THỐNG
     # ==========================================
     TEMP_IMAGE_SIZE = 768
     TEMP_CROPS = 1
@@ -44,85 +57,35 @@ def main():
     GRAD_ACCUM_STEPS = max(1, EFFECTIVE_BATCH_SIZE // BATCH_SIZE)
     NUM_CLASSES = 3
 
-    # ==========================================
-    # QUY TẮC NỘI SUY (interpolation):
-    #   - ẢNH (RGBA, giá trị liên tục 0-255)  -> INTER_LINEAR
-    #     Cho phép pha trộn màu giữa các pixel lân cận khi xoay/scale,
-    #     giữ được cạnh mượt thay vì răng cưa.
-    #   - MASK (nhãn rời rạc 0=BG, 1=Fill, 2=Satin) -> INTER_NEAREST BẮT BUỘC
-    #     Không được nội suy tuyến tính, vì trung bình cộng của 2 class index
-    #     (ví dụ (1+2)/2 = 1.5) không phải 1 nhãn hợp lệ nào cả -> sẽ tạo ra
-    #     "nhãn ma" ở biên giữa Fill/Satin, làm hỏng ground truth.
-    #
-    # Albumentations 2.x đã tách sẵn 2 tham số interpolation/mask_interpolation
-    # cho các transform resize/affine, với mask_interpolation mặc định là
-    # INTER_NEAREST. Ở đây set TƯỜNG MINH cả 2 để không phụ thuộc default
-    # ngầm (phòng khi nâng cấp lib sau này đổi default).
-    # ==========================================
     IMG_INTERPOLATION = cv2.INTER_LINEAR
     MASK_INTERPOLATION = cv2.INTER_NEAREST
 
-    # Lưu ý: A.PadIfNeeded với fill=0 trên ảnh RGBA sẽ chèn padding là (0,0,0,0) - tức là viền trong suốt
     train_transform = A.Compose([
-        A.LongestMaxSize(
-            max_size=TEMP_IMAGE_SIZE,
-            interpolation=IMG_INTERPOLATION,
-            mask_interpolation=MASK_INTERPOLATION,
-        ),
-        A.PadIfNeeded(
-            min_height=TEMP_IMAGE_SIZE,
-            min_width=TEMP_IMAGE_SIZE,
-            border_mode=cv2.BORDER_CONSTANT,
-            fill=0,
-            fill_mask=0
-        ),
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE, interpolation=IMG_INTERPOLATION, mask_interpolation=MASK_INTERPOLATION),
+        A.PadIfNeeded(min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Affine(
             translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
-            scale=(0.85, 1.15),
-            rotate=(-30, 30),
-            interpolation=IMG_INTERPOLATION,
-            mask_interpolation=MASK_INTERPOLATION,
-            border_mode=cv2.BORDER_CONSTANT,
-            fill=0,
-            fill_mask=0,
-            p=0.7
+            scale=(0.85, 1.15), rotate=(-30, 30),
+            interpolation=IMG_INTERPOLATION, mask_interpolation=MASK_INTERPOLATION,
+            border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.7
         ),
         A.ElasticTransform(alpha=120, sigma=6, p=0.3),
         A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
-        A.CoarseDropout(
-            num_holes_range=(4, 8), hole_height_range=(10, 30),
-            hole_width_range=(10, 30), fill=0, p=0.3
-        ),
-        # A.GaussNoise(std_range=(0.01, 0.02), p=0.3),
-        # A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+        A.CoarseDropout(num_holes_range=(4, 8), hole_height_range=(10, 30), hole_width_range=(10, 30), fill=0, p=0.3),
         ToTensorV2()
     ])
 
     val_transform = A.Compose([
-        A.LongestMaxSize(
-            max_size=TEMP_IMAGE_SIZE,
-            interpolation=IMG_INTERPOLATION,
-            mask_interpolation=MASK_INTERPOLATION,
-        ),
-        A.PadIfNeeded(
-            min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, 
-            border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0
-        ),
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE, interpolation=IMG_INTERPOLATION, mask_interpolation=MASK_INTERPOLATION),
+        A.PadIfNeeded(min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
         ToTensorV2()
     ])
 
     tracking_transform = A.Compose([
-        A.LongestMaxSize(
-            max_size=TEMP_IMAGE_SIZE,
-            interpolation=IMG_INTERPOLATION,
-            mask_interpolation=MASK_INTERPOLATION,
-        ),
-        A.PadIfNeeded(
-            min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, 
-            border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0
-        ),
+        A.LongestMaxSize(max_size=TEMP_IMAGE_SIZE, interpolation=IMG_INTERPOLATION, mask_interpolation=MASK_INTERPOLATION),
+        A.PadIfNeeded(min_height=TEMP_IMAGE_SIZE, min_width=TEMP_IMAGE_SIZE, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0),
         ToTensorV2()
     ])
 
@@ -138,7 +101,9 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=train_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=val_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
-    tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # Ép batch_size=4 để lấy đủ 4 ảnh cố định cho việc log validation
+    tracking_loader = DataLoader(tracking_dataset, batch_size=4, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
     print(f"Number of validation images (Full Scale): {len(val_dataset)}")
@@ -149,7 +114,7 @@ def main():
     # ==========================================
     wandb.init(
         project="embroidery-segmentation", 
-        name="logo-v8-3class-improved-rgba",         
+        name="logo-v8-3class-deep-supervision-logs",         
         config={                           
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
@@ -160,7 +125,7 @@ def main():
             "grad_accum_steps": GRAD_ACCUM_STEPS,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
-            "input_channels": 4, # Ghi chú cấu hình 4 kênh
+            "input_channels": 4, 
             "fill_weight": 2, 
             "satin_weight": 5,
             "supersample_factor": 2,
@@ -227,19 +192,17 @@ def main():
         running_train_loss = 0.0
         all_train_preds = []
         all_train_masks = []
+        
+        # Các mảng dùng để chứa 4 ảnh log
         train_rgb_samples = []
         train_mask_samples = []
-        train_pred_samples = []
+        train_preds_levels = {k: [] for k in range(7)} # Chứa 7 cấp độ dự đoán
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
         optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (images, masks, rgb_images) in enumerate(loop):
             images, masks = images.to(device), masks.to(device)
-            
-            if batch_idx == 0:
-                train_rgb_samples = rgb_images[:min(4, rgb_images.size(0))]
-                train_mask_samples = masks[:min(4, masks.size(0))]
             
             with torch.autocast(device_type=device.type):
                 outputs = model(images)  
@@ -274,8 +237,18 @@ def main():
                 preds = torch.argmax(outputs[0], dim=1)
                 all_train_preds.append(preds.cpu())
                 all_train_masks.append(masks.cpu())
-                if batch_idx == 0:
-                    train_pred_samples = preds[:min(4, preds.size(0))]
+                
+                # Gom nhặt cho đủ 4 ảnh Train
+                if len(train_rgb_samples) < 4:
+                    n_needed = 4 - len(train_rgb_samples)
+                    
+                    train_rgb_samples.extend([img for img in rgb_images[:n_needed]])
+                    train_mask_samples.extend([m.cpu() for m in masks[:n_needed]])
+                    
+                    # Lấy cả 7 feature maps (d0 đến d6)
+                    for level in range(7):
+                        level_preds = torch.argmax(outputs[level][:n_needed], dim=1)
+                        train_preds_levels[level].extend([p.cpu() for p in level_preds])
 
         avg_train_loss = running_train_loss / len(train_loader)
         all_train_preds = torch.cat(all_train_preds, dim=0)
@@ -289,26 +262,21 @@ def main():
         train_iou_fill = train_metrics['iou_fill']
         train_iou_satin = train_metrics['iou_satin']
         
+        # Tạo mảng ảnh log cho WandB (Train)
         train_wandb_images = []
-        if len(train_rgb_samples) > 0 and len(train_pred_samples) > 0:
-            for i in range(min(4, len(train_rgb_samples))):
+        if len(train_rgb_samples) > 0:
+            for i in range(len(train_rgb_samples)):
                 rgb_np = train_rgb_samples[i].numpy()
-                true_mask_np = train_mask_samples[i].cpu().numpy().astype(np.uint8)
-                pred_mask_np = train_pred_samples[i].cpu().numpy().astype(np.uint8)
-                
-                # Create colored masks for visualization
-                true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
-                pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
-                
-                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
-                true_mask_colored[true_mask_np == 1] = [0, 255, 255]
-                true_mask_colored[true_mask_np == 2] = [255, 0, 255]
-                pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
-                pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
+                true_mask_np = train_mask_samples[i].numpy().astype(np.uint8)
                 
                 train_wandb_images.append(wandb.Image(rgb_np, caption=f"Train Input #{i+1}"))
-                train_wandb_images.append(wandb.Image(true_mask_colored, caption=f"Train GT #{i+1}"))
-                train_wandb_images.append(wandb.Image(pred_mask_colored, caption=f"Train Pred #{i+1}"))
+                train_wandb_images.append(wandb.Image(colorize_mask(true_mask_np), caption=f"Train GT #{i+1}"))
+                
+                # Log lần lượt 7 mức dự đoán
+                for level in range(7):
+                    pred_np = train_preds_levels[level][i].numpy().astype(np.uint8)
+                    caption_text = f"Train Pred (d0 - Final) #{i+1}" if level == 0 else f"Train Pred d{level} #{i+1}"
+                    train_wandb_images.append(wandb.Image(colorize_mask(pred_np), caption=caption_text))
 
         # --- PHA VALIDATION ---
         model.eval()
@@ -337,15 +305,13 @@ def main():
                 all_val_preds.append(preds.cpu())
                 all_val_masks.append(val_masks.cpu())
 
-            # --- DỰ ĐOÁN ẢNH WANDB PHÔNG NỀN ẢO ---
+            # --- DỰ ĐOÁN ẢNH WANDB PHÔNG NỀN ẢO & 7 MỨC ĐẶC TRƯNG ---
             fixed_outputs = model(fixed_val_images)
-            fixed_preds = torch.argmax(fixed_outputs[0], dim=1)
-
+            
             wandb_log_images = []
             num_images = min(4, fixed_val_images.size(0))
             for i in range(num_images):
-                rgb_np = fixed_val_rgb[i].numpy()
-                
+                # 1. Overlay hình gốc 
                 img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy()
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
@@ -354,26 +320,20 @@ def main():
                     
                 rgb_fg = img_np[:, :, :3]
                 alpha = img_np[:, :, 3:4] / 255.0 
-                
                 bg_color = np.full_like(rgb_fg, 128)
                 img_display = (rgb_fg * alpha + bg_color * (1 - alpha)).astype(np.uint8)
                 
+                # 2. Xử lý Ground Truth
                 true_mask_np = fixed_val_masks[i].cpu().numpy().astype(np.uint8)
-                pred_mask_np = fixed_preds[i].cpu().numpy().astype(np.uint8)
                 
-                # Create colored masks for visualization
-                true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
-                pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
+                wandb_log_images.append(wandb.Image(img_display, caption=f"Val Input #{i+1}"))
+                wandb_log_images.append(wandb.Image(colorize_mask(true_mask_np), caption=f"Val GT #{i+1}"))
                 
-                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
-                true_mask_colored[true_mask_np == 1] = [0, 255, 255]
-                true_mask_colored[true_mask_np == 2] = [255, 0, 255]
-                pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
-                pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
-                
-                wandb_log_images.append(wandb.Image(rgb_np, caption=f"Val Input #{i+1}"))
-                wandb_log_images.append(wandb.Image(true_mask_colored, caption=f"Val GT #{i+1}"))
-                wandb_log_images.append(wandb.Image(pred_mask_colored, caption=f"Val Pred #{i+1}"))
+                # 3. Quét qua toàn bộ 7 mức Deep Supervision
+                for level in range(7):
+                    pred_np = torch.argmax(fixed_outputs[level][i], dim=0).cpu().numpy().astype(np.uint8)
+                    caption_text = f"Val Pred (d0 - Final) #{i+1}" if level == 0 else f"Val Pred d{level} #{i+1}"
+                    wandb_log_images.append(wandb.Image(colorize_mask(pred_np), caption=caption_text))
 
         avg_val_loss = running_val_loss / len(val_loader)
         all_val_preds = torch.cat(all_val_preds, dim=0)
