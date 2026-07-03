@@ -16,3 +16,5 @@ cairosvg
 shapely
 torchmetrics
 pandas
+svgpathtools
+scikit-image

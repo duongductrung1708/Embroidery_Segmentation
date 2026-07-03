@@ -9,7 +9,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from torch.utils.data import Dataset
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 from io import BytesIO
 from PIL import Image
 
@@ -21,6 +21,16 @@ except ImportError:
     import sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "cairosvg"])
     import cairosvg
+
+# Bộ phân loại hình học (rule cứng: outer boundary / ring / width) dùng để
+# tự động sinh nhãn satin/fill cho các path CHƯA được gán label thủ công.
+try:
+    from src.svg_path_classifier import build_geometric_metadata
+except ImportError:
+    try:
+        from .svg_path_classifier import build_geometric_metadata
+    except ImportError:
+        from svg_path_classifier import build_geometric_metadata
 
 SATIN_COLORS = [
     "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF",
@@ -40,20 +50,93 @@ LABEL_SATIN = 2
 _MASK_COLOR_FILL = "#FF0000"   
 _MASK_COLOR_SATIN = "#00FF00"  
 
-def parse_svg_metadata(svg_path: str) -> Tuple[ET.Element, Dict[str, str]]:
+_VALID_STITCH_TYPES = {"satin", "fill"}
+
+
+def _load_svg_root(svg_path: str) -> ET.Element:
+    """Load SVG và trả về root, không đọc metadata gì cả (dùng khi chỉ cần
+    1 bản root sạch để mutate màu, không cần label)."""
+    tree = ET.parse(svg_path)
+    return tree.getroot()
+
+
+def parse_svg_metadata_raw(svg_path: str) -> Tuple[ET.Element, Dict[str, Optional[str]]]:
+    """
+    Đọc label Inkscape THỦ CÔNG của từng path, nếu có.
+
+    Khác với hàm parse_svg_metadata cũ: path nào KHÔNG có label hợp lệ
+    ('satin' hoặc 'fill') sẽ được gán None thay vì mặc định 'fill', để
+    phân biệt được "đã gán tay" và "chưa gán tay -> cần suy ra bằng hình học".
+    """
     tree = ET.parse(svg_path)
     root = tree.getroot()
-    
-    metadata = {}
+
+    metadata: Dict[str, Optional[str]] = {}
     for child in root.iter():
         tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
         if tag == "path":
             path_id = child.get("id")
-            stitch_type = child.get("{http://www.inkscape.org/namespaces/inkscape}label", "fill")
-            if path_id is not None:
-                metadata[path_id] = stitch_type.strip().lower() if stitch_type else "fill"
-    
+            if path_id is None:
+                continue
+            raw_label = child.get("{http://www.inkscape.org/namespaces/inkscape}label")
+            if raw_label is not None:
+                raw_label = raw_label.strip().lower()
+                if raw_label not in _VALID_STITCH_TYPES:
+                    raw_label = None
+            metadata[path_id] = raw_label
+
     return root, metadata
+
+
+def parse_svg_metadata(svg_path: str) -> Tuple[ET.Element, Dict[str, str]]:
+    """
+    [Giữ lại để tương thích ngược] Đọc label Inkscape thủ công, mặc định
+    'fill' cho path chưa gán. KHÔNG dùng hàm này để lấy metadata cuối cùng
+    cho train nữa -- dùng build_hybrid_metadata() thay thế. Hàm này chỉ còn
+    hữu ích khi cần load nhanh 1 bản root + label thô kiểu cũ.
+    """
+    root, raw_metadata = parse_svg_metadata_raw(svg_path)
+    metadata = {pid: (label if label is not None else "fill") for pid, label in raw_metadata.items()}
+    return root, metadata
+
+
+def build_hybrid_metadata(svg_path: str) -> Dict[str, str]:
+    """
+    Nguồn nhãn cuối cùng dùng để train, theo thứ tự ưu tiên:
+
+    1. Label Inkscape thủ công ('satin'/'fill') nếu path đã được gán rõ ràng.
+    2. Nếu chưa gán (hoặc file không có label nào) -> suy ra bằng RULE CỨNG
+       hình học (svg_path_classifier.build_geometric_metadata):
+         - path bám viền ngoài cùng logo -> satin
+         - path dạng khung/viền mỏng (ring) bao quanh path khác -> satin
+         - width <= 2cm -> satin, width > 2cm -> fill
+
+    Luôn tính rule hình học cho TOÀN BỘ path trước (baseline), sau đó ghi
+    đè bằng label thủ công ở những path đã có label -- để 1 file SVG có
+    thể trộn lẫn: vài path gán tay cho chắc, phần còn lại để hình học tự lo.
+    """
+    try:
+        geometric_metadata = build_geometric_metadata(svg_path)
+    except Exception as e:
+        print(f"[WARNING] Khong the phan loai hinh hoc cho {svg_path}: {e}. "
+              f"Fallback: moi path chua gan nhan -> 'fill'.")
+        geometric_metadata = {}
+
+    _, manual_metadata = parse_svg_metadata_raw(svg_path)
+
+    # Baseline: hợp toàn bộ path_id xuất hiện ở 1 trong 2 nguồn
+    all_ids = set(geometric_metadata.keys()) | set(manual_metadata.keys())
+
+    metadata: Dict[str, str] = {}
+    for path_id in all_ids:
+        manual_label = manual_metadata.get(path_id)
+        if manual_label is not None:
+            metadata[path_id] = manual_label
+        else:
+            metadata[path_id] = geometric_metadata.get(path_id, "fill")
+
+    return metadata
+
 
 def augment_svg_colors(root: ET.Element, metadata: Dict[str, str], seed: int = None) -> None:
     if seed is not None:
@@ -205,9 +288,13 @@ class EmbroideryDatasetSVG(Dataset):
     def _get_metadata_and_mask(self, svg_path: str) -> Tuple[Dict[str, str], np.ndarray]:
         if self.cache_in_memory and svg_path in self._cache:
             return self._cache[svg_path]
-        _, metadata = parse_svg_metadata(svg_path)
+
+        # Nhãn cuối cùng: label thủ công (nếu path đã gán) ghi đè lên nhãn
+        # tự động suy ra bằng rule hình học cứng cho các path còn lại.
+        metadata = build_hybrid_metadata(svg_path)
         if not metadata:
-            raise ValueError(f"No metadata found in {svg_path}")
+            raise ValueError(f"No paths found in {svg_path}")
+
         mask = create_label_mask(svg_path, self.target_size, self.target_size, metadata,
                                   supersample_factor=self.supersample_factor)
         if self.cache_in_memory:
@@ -219,7 +306,7 @@ class EmbroideryDatasetSVG(Dataset):
         metadata, mask = self._get_metadata_and_mask(svg_path)
         mask_binary = mask.astype(np.float32)
 
-        root, _ = parse_svg_metadata(svg_path)
+        root = _load_svg_root(svg_path)
         svg_width, svg_height = get_svg_dimensions(svg_path)
 
         if self.augment_color:
