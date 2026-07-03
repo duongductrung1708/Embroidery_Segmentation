@@ -191,7 +191,7 @@ def check_no_overlap(train_dir: str, val_dir: str):
 # ==========================
 
 def split_svg_files(source_dirs: List[str], train_dir: str, val_dir: str,
-                     train_ratio: float = 0.8, seed: int = 42, n_buckets: int = 4,
+                     train_ratio: float = 0.7, seed: int = 42, n_buckets: int = 4,
                      auto_seed: bool = False, n_trials: int = 200,
                      min_satin_for_val: int = 1, min_fill_for_val: int = 1):
     """
@@ -341,8 +341,8 @@ if __name__ == "__main__":
                          help="Output directory for training set")
     parser.add_argument("--val-dir", default="data/logo/val_svg",
                          help="Output directory for validation set")
-    parser.add_argument("--train-ratio", type=float, default=0.8,
-                         help="Ratio of training data (default: 0.8)")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                         help="Ratio of training data (default: 0.7)")
     parser.add_argument("--seed", type=int, default=42,
                          help="Random seed (default: 42)")
     parser.add_argument("--n-buckets", type=int, default=4,
