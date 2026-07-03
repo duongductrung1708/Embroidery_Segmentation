@@ -87,9 +87,9 @@ def main():
     # ==========================================
     # 2. KHỞI TẠO DỮ LIỆU & DATALOADER
     # ==========================================
-    train_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/train_svg", transform=train_transform, crops_per_image=TEMP_CROPS, augment_color=True, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
-    val_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
-    tracking_dataset = EmbroideryDatasetSVG(svg_dir="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
+    train_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/train_svg", transform=train_transform, crops_per_image=TEMP_CROPS, augment_color=True, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
+    val_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
+    tracking_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, persistent_workers=True) 
