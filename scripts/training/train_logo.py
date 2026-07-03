@@ -154,7 +154,7 @@ def main():
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
             "dataset": "Logo_3Class_V2",
-            "epochs": 100,
+            "epochs": 200,
             "batch_size": BATCH_SIZE,
             "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
             "grad_accum_steps": GRAD_ACCUM_STEPS,
