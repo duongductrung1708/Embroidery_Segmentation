@@ -16,9 +16,9 @@ from src.model import U2NET
 # ==========================================
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 IMAGE_SIZE = 768 
-MODEL_PATH = "checkpoints/logo/checkpoints_logo_u2net_logo_best.pth" 
+MODEL_PATH = "checkpoints/logo/logo_best_overall.pth" 
 
-SINGLE_IMAGE_PATH = "./data/test/logo/test3_logo.png"
+SINGLE_IMAGE_PATH = "./data/svg/dirty_png/42.png"
 OUTPUT_DIR = "./data/test/logo/predictions/"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
