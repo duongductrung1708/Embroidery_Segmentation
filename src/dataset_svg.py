@@ -295,8 +295,8 @@ class EmbroideryDatasetSVG(Dataset):
         if self.cache_in_memory and svg_path in self._cache:
             return self._cache[svg_path]
 
-        # Nhãn cuối cùng: label thủ công (nếu path đã gán) ghi đè lên nhãn
-        # tự động suy ra bằng rule hình học cứng cho các path còn lại.
+        # Nhãn cuối cùng: label thủ công/convert (nếu path đã gán) ghi đè lên
+        # nhãn tự động suy ra bằng rule convert cho các path còn lại.
         metadata = build_hybrid_metadata(svg_path)
         if not metadata:
             raise ValueError(f"No paths found in {svg_path}")

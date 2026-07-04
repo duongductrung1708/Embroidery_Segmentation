@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 SVG Path Classifier for Embroidery Segmentation
 ================================================
@@ -7,25 +8,13 @@ Phân loại tự động path SVG thành:
 - Fill (1)
 - Satin (2)
 
-Chỉ dựa trên hình học (KHÔNG dùng màu, stroke-width, hay tên layer).
+Chỉ dựa trên hình học (Đã chuẩn hóa 100% về Millimet - mm).
 
 QUY TẮC CỨNG (dùng để sinh nhãn train tự động):
-1. Path bám theo viền ngoài cùng của toàn bộ logo -> SATIN
-2. Path dạng khung/viền mỏng (ring, có lỗ ở giữa, solidity thấp) bao quanh
-   path khác -> SATIN, bất kể độ rộng.
-   (Chỉ áp dụng cho hình dạng "khung mỏng" thật sự -- KHÔNG áp dụng cho
-   một khối đặc chỉ tình cờ chứa 1 chi tiết nhỏ bên trong nó, để tránh
-   ép nhầm mảng fill lớn thành satin.)
-3. Width <= 2cm -> SATIN
-4. Width > 2cm -> FILL
-
-So với bản gốc, file này sửa 2 lỗi hình học quan trọng:
-- render_path_to_polygon: xử lý đúng path có nhiều subpath / có lỗ
-  (chữ "O", "A", logo có viền lồng nhau...) thay vì gộp tất cả điểm
-  thành một Polygon tự cắt nhau.
-- find_outer_boundary_paths: dùng silhouette hợp nhất (unary_union) +
-  dải biên ngoài (outer band) để so khớp hình học, thay vì heuristic
-  diện tích 10%/5% + "chạm mép bounding box" dễ sai.
+1. Path bám theo viền ngoài cùng của toàn bộ logo (dày <= 8mm) -> SATIN
+2. Path dạng khung/viền mỏng (ring, có lỗ ở giữa, solidity thấp) -> SATIN
+3. Width <= 2.0mm -> SATIN
+4. Width > 2.0mm -> FILL
 """
 
 import re
@@ -43,24 +32,25 @@ from shapely.ops import unary_union
 from skimage.morphology import skeletonize
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants (Hệ Millimet - mm)
 # ---------------------------------------------------------------------------
 LABEL_BACKGROUND = 0
 LABEL_FILL = 1
 LABEL_SATIN = 2
 
-# Nếu SVG không có đơn vị thực (cm/mm/in), giả sử logo rộng bằng giá trị này
-DEFAULT_REAL_WIDTH_CM = 10.0
+# Nếu SVG không có đơn vị thực, giả sử logo rộng 80mm (8cm)
+DEFAULT_REAL_WIDTH_MM = 80.0
 
 # Ngưỡng phân loại theo độ rộng
-SATIN_WIDTH_THRESHOLD_CM = 2.0
+SATIN_WIDTH_THRESHOLD_MM = 2.0
 
-# Path được coi là "khung/viền" (ring, donut) nếu độ đặc
-# (solidity = area / convex_hull_area) thấp hơn ngưỡng này
+# Giới hạn độ dày tối đa cho viền ngoài cùng để được gọi là SATIN
+OUTER_BORDER_MAX_THICKNESS_MM = 8.0
+
+# Path được coi là "khung/viền" (ring, donut) nếu độ đặc thấp hơn ngưỡng này
 RING_SOLIDITY_THRESHOLD = 0.35
 
-# Path được coi là bám viền ngoài nếu >= tỉ lệ này diện tích của nó
-# nằm trong dải biên ngoài (outer band) của silhouette toàn logo
+# Path được coi là bám viền ngoài nếu >= tỉ lệ này diện tích của nó nằm trong dải biên ngoài
 OUTER_BAND_OVERLAP_THRESHOLD = 0.6
 
 # Độ dày dải biên ngoài, tính theo % kích thước lớn nhất (bbox) của logo
@@ -75,21 +65,21 @@ class SVGPath:
         self.element = element
         self.path_data = path_data
         self.label: Optional[str] = None          # 'SATIN' hoặc 'FILL'
-        self.width_cm: Optional[float] = None
+        self.width_mm: Optional[float] = None     # Đã đổi thành mm
         self.is_outer_boundary: bool = False
         self.is_ring_shape: bool = False
-        self.geometry = None                       # shapely geometry đã xử lý hole
+        self.geometry = None                      
 
 
 # ---------------------------------------------------------------------------
-# Load SVG & quy đổi đơn vị
+# Load SVG & quy đổi đơn vị về mm
 # ---------------------------------------------------------------------------
 def load_svg(svg_path: str) -> Tuple[ET.Element, Dict[str, SVGPath], float]:
-    """Load SVG, trả về (root, dict path_id -> SVGPath, pixel_per_cm)."""
+    """Load SVG, trả về (root, dict path_id -> SVGPath, pixel_per_mm)."""
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
-    pixel_per_cm = calculate_pixel_per_cm(root)
+    pixel_per_mm = calculate_pixel_per_mm(root)
 
     paths: Dict[str, SVGPath] = {}
     for idx, child in enumerate(root.iter()):
@@ -100,11 +90,11 @@ def load_svg(svg_path: str) -> Tuple[ET.Element, Dict[str, SVGPath], float]:
             if path_data:
                 paths[path_id] = SVGPath(path_id, child, path_data)
 
-    return root, paths, pixel_per_cm
+    return root, paths, pixel_per_mm
 
 
-def calculate_pixel_per_cm(root: ET.Element) -> float:
-    """Tính pixel/cm từ viewBox + width (nếu có đơn vị thực)."""
+def calculate_pixel_per_mm(root: ET.Element) -> float:
+    """Tính pixel/mm từ viewBox + width (nếu có đơn vị thực)."""
     viewbox = root.get("viewBox")
     if viewbox:
         try:
@@ -119,11 +109,11 @@ def calculate_pixel_per_cm(root: ET.Element) -> float:
     value, unit = parse_dimension(width_str)
 
     if unit:
-        width_cm = convert_to_cm(value, unit)
-        return vb_width / width_cm
+        width_mm = convert_to_mm(value, unit)
+        return vb_width / width_mm
 
-    # Không có đơn vị thực -> giả sử logo rộng DEFAULT_REAL_WIDTH_CM
-    return vb_width / DEFAULT_REAL_WIDTH_CM
+    # Không có đơn vị thực -> giả sử logo rộng 80mm
+    return vb_width / DEFAULT_REAL_WIDTH_MM
 
 
 def parse_dimension(dimension_str: str) -> Tuple[float, Optional[str]]:
@@ -140,18 +130,18 @@ def parse_dimension(dimension_str: str) -> Tuple[float, Optional[str]]:
     return 100.0, None
 
 
-def convert_to_cm(value: float, unit: str) -> float:
-    """Quy đổi giá trị sang cm."""
+def convert_to_mm(value: float, unit: str) -> float:
+    """Quy đổi giá trị thẳng sang mm."""
     unit = unit.lower()
     conversions = {
-        'cm': 1.0,
-        'mm': 0.1,
-        'm': 100.0,
-        'in': 2.54,
-        'ft': 30.48,
-        'px': 0.0264583333,  # 96 DPI
-        'pt': 0.0352777778,
-        'pc': 0.4233333333,
+        'cm': 10.0,
+        'mm': 1.0,
+        'm': 1000.0,
+        'in': 25.4,
+        'ft': 304.8,
+        'px': 0.264583333,  # 96 DPI
+        'pt': 0.352777778,
+        'pc': 4.233333333,
     }
     return value * conversions.get(unit, 1.0)
 
@@ -185,8 +175,6 @@ def get_svg_dimensions(svg_path: str) -> Tuple[int, int]:
 # Hình học: dựng polygon chính xác cho path có nhiều subpath / có lỗ
 # ---------------------------------------------------------------------------
 def _sample_subpaths(path_data: str, num_samples: int = 80) -> List[List[Tuple[float, float]]]:
-    """Tách 'd' thành các subpath rời rạc (mỗi lệnh M mới bắt đầu 1 subpath)
-    và sample điểm cho từng subpath."""
     try:
         path = svgpathtools.parse_path(path_data)
     except Exception as e:
@@ -211,18 +199,6 @@ def _sample_subpaths(path_data: str, num_samples: int = 80) -> List[List[Tuple[f
 
 
 def render_path_to_polygon(path_element: ET.Element) -> Optional[MultiPolygon]:
-    """
-    Dựng geometry chính xác cho 1 path SVG có thể gồm nhiều subpath
-    (ví dụ chữ 'O', 'A' có lỗ, hoặc viền lồng nhau).
-
-    Cách làm:
-    1. Sample từng subpath thành 1 Polygon riêng (chưa có hole).
-    2. Tính độ sâu lồng nhau (nesting depth): 1 subpath nằm trong bao nhiêu
-       subpath khác.
-    3. Subpath depth chẵn (0, 2, 4...) là phần đặc (exterior).
-       Subpath depth lẻ (1, 3, 5...) là lỗ (hole) của subpath cha gần nhất.
-    4. Ghép thành MultiPolygon (exterior kèm hole tương ứng).
-    """
     data = path_element.get("d", "")
     if not data:
         return None
@@ -269,7 +245,6 @@ def render_path_to_polygon(path_element: ET.Element) -> Optional[MultiPolygon]:
     for ext_i in exteriors_idx:
         ext_poly = raw_polys[ext_i]
         if ext_poly.geom_type != "Polygon":
-            # Trường hợp hiếm (buffer(0) trả về MultiPolygon): bỏ qua xử lý hole
             if not ext_poly.is_empty:
                 result_polys.append(ext_poly)
             continue
@@ -301,7 +276,6 @@ def render_path_to_polygon(path_element: ET.Element) -> Optional[MultiPolygon]:
 
 
 def _iter_polygons(geom):
-    """Duyệt qua từng Polygon con của 1 geometry (Polygon hoặc MultiPolygon)."""
     if geom is None:
         return
     if geom.geom_type == "Polygon":
@@ -314,21 +288,6 @@ def _iter_polygons(geom):
 # Rule 1: phát hiện path bám viền ngoài cùng của logo
 # ---------------------------------------------------------------------------
 def find_outer_boundary_paths(paths: Dict[str, SVGPath], svg_width: int, svg_height: int) -> None:
-    """
-    Xác định path nào bám theo viền ngoài cùng của toàn bộ logo.
-
-    1. Dựng geometry chính xác (đã xử lý hole) cho từng path, cache vào
-       path_obj.geometry.
-    2. Hợp toàn bộ geometry -> silhouette thật của logo.
-    3. Lấy 1 dải mỏng sát viền ngoài của silhouette (outer band =
-       silhouette trừ đi bản co lại 1 khoảng nhỏ).
-    4. Path nào phủ phần lớn diện tích của chính nó lên dải này
-       -> path đó chính là đường viền -> SATIN.
-
-    Cách này thay thế heuristic cũ (diện tích > 10% tổng + "chạm mép
-    bounding box"), vốn dễ sai với logo có nhiều path nhỏ rải rác hoặc
-    có 1 mảng fill lớn tình cờ nằm sát mép.
-    """
     geoms = {}
     for pid, p in paths.items():
         g = render_path_to_polygon(p.element)
@@ -364,15 +323,6 @@ def find_outer_boundary_paths(paths: Dict[str, SVGPath], svg_width: int, svg_hei
 # Rule 2: phát hiện path dạng khung/viền mỏng (ring) bao quanh path khác
 # ---------------------------------------------------------------------------
 def compute_ring_shapes(paths: Dict[str, SVGPath]) -> None:
-    """
-    Đánh dấu các path dạng "khung/viền" (ring, donut): có lỗ ở giữa VÀ
-    độ đặc (solidity = area / convex_hull_area) thấp.
-
-    Đây là điều kiện bổ sung cho rule "path bao path khác -> SATIN":
-    chỉ ép SATIN khi bản thân path là 1 đường viền mỏng thật sự, KHÔNG
-    áp dụng cho 1 khối đặc chỉ tình cờ chứa 1 chi tiết nhỏ bên trong nó
-    (tránh ép nhầm mảng fill lớn, ví dụ nền logo 8cm, thành satin).
-    """
     for p in paths.values():
         g = p.geometry
         if g is None or g.is_empty:
@@ -392,11 +342,10 @@ def compute_ring_shapes(paths: Dict[str, SVGPath]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Đo độ rộng vật lý của path (distance transform + skeleton)
+# Đo độ rộng vật lý của path ra Millimet
 # ---------------------------------------------------------------------------
 def render_path_to_mask(path_element: ET.Element, svg_width: int, svg_height: int,
                          supersample_factor: int = 1) -> Optional[np.ndarray]:
-    """Render 1 path SVG thành binary mask (0/1), full-canvas size."""
     try:
         data = path_element.get("d", "")
         if not data:
@@ -433,13 +382,8 @@ def render_path_to_mask(path_element: ET.Element, svg_width: int, svg_height: in
         return None
 
 
-def estimate_path_width_cm(path_obj: SVGPath, svg_width: int, svg_height: int,
-                            pixel_per_cm: float, supersample_factor: int = 2) -> float:
-    """
-    Ước lượng độ rộng vật lý (cm) của path bằng distance transform + skeleton:
-    width ~ 2 * khoảng cách từ skeleton (medial axis) đến biên,
-    lấy percentile 75% để tránh bị nhiễu bởi các đầu nhọn.
-    """
+def estimate_path_width_mm(path_obj: SVGPath, svg_width: int, svg_height: int,
+                            pixel_per_mm: float, supersample_factor: int = 2) -> float:
     try:
         mask = render_path_to_mask(path_obj.element, svg_width, svg_height, supersample_factor)
         if mask is None or mask.sum() == 0:
@@ -457,8 +401,8 @@ def estimate_path_width_cm(path_obj: SVGPath, svg_width: int, svg_height: int,
             else:
                 width_pixels = 2 * distance_transform.max()
 
-        width_cm = width_pixels / (supersample_factor * pixel_per_cm)
-        return max(0.0, width_cm)
+        width_mm = width_pixels / (supersample_factor * pixel_per_mm)
+        return max(0.0, width_mm)
 
     except Exception as e:
         print(f"Error estimating path width for {path_obj.id}: {e}")
@@ -466,23 +410,23 @@ def estimate_path_width_cm(path_obj: SVGPath, svg_width: int, svg_height: int,
 
 
 # ---------------------------------------------------------------------------
-# Rule cứng tổng hợp
+# Rule cứng tổng hợp (Theo chuẩn mm)
 # ---------------------------------------------------------------------------
-def classify_path(path_obj: SVGPath, width_cm: float) -> str:
-    """
-    QUY TẮC CỨNG:
-    1. Path bám viền ngoài cùng logo -> SATIN
-    2. Path dạng khung/viền mỏng (ring) bao quanh path khác -> SATIN
-       (bất kể width, nhưng chỉ khi thực sự là hình khung mỏng)
-    3. Width <= 2cm -> SATIN
-    4. Width > 2cm -> FILL
-    """
+def classify_path(path_obj: SVGPath, width_mm: float) -> str:
+    # Rule 1: Viền ngoài cùng
     if path_obj.is_outer_boundary:
-        return 'SATIN'
+        if width_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
+            return 'SATIN'
+        return 'FILL'  # Nếu viền ngoài cùng mà quá to (ví dụ mảng nền lớn) thì ép về FILL
+        
+    # Rule 2: Khung rỗng
     if path_obj.is_ring_shape:
         return 'SATIN'
-    if width_cm <= SATIN_WIDTH_THRESHOLD_CM:
+        
+    # Rule 3: Độ dày
+    if width_mm <= SATIN_WIDTH_THRESHOLD_MM:
         return 'SATIN'
+        
     return 'FILL'
 
 
@@ -491,9 +435,7 @@ def classify_path(path_obj: SVGPath, width_cm: float) -> str:
 # ---------------------------------------------------------------------------
 def render_mask(svg_path: str, output_width: int, output_height: int,
                  supersample_factor: int = 2) -> np.ndarray:
-    """Chạy toàn bộ pipeline: load -> phát hiện boundary/ring -> đo width ->
-    phân loại -> render mask 3 lớp (0=BG, 1=Fill, 2=Satin)."""
-    root, paths, pixel_per_cm = load_svg(svg_path)
+    root, paths, pixel_per_mm = load_svg(svg_path)
 
     if not paths:
         return np.zeros((output_height, output_width), dtype=np.uint8)
@@ -504,12 +446,12 @@ def render_mask(svg_path: str, output_width: int, output_height: int,
     compute_ring_shapes(paths)
 
     for pid, path_obj in paths.items():
-        width_cm = estimate_path_width_cm(path_obj, svg_width, svg_height,
-                                           pixel_per_cm, supersample_factor)
-        path_obj.width_cm = width_cm
-        path_obj.label = classify_path(path_obj, width_cm)
+        width_mm = estimate_path_width_mm(path_obj, svg_width, svg_height,
+                                           pixel_per_mm, supersample_factor)
+        path_obj.width_mm = width_mm
+        path_obj.label = classify_path(path_obj, width_mm)
 
-        print(f"Path {pid}: width={width_cm:.3f}cm, "
+        print(f"Path {pid}: width={width_mm:.3f}mm, "
               f"boundary={path_obj.is_outer_boundary}, ring={path_obj.is_ring_shape}, "
               f"label={path_obj.label}")
 
@@ -520,7 +462,6 @@ def render_mask(svg_path: str, output_width: int, output_height: int,
 def render_classified_mask(paths: Dict[str, SVGPath], output_width: int, output_height: int,
                             svg_width: int, svg_height: int,
                             supersample_factor: int = 1) -> np.ndarray:
-    """Render mask cuối cùng dựa trên nhãn đã phân loại của từng path."""
     mask = np.zeros((output_height, output_width), dtype=np.uint8)
 
     for path_obj in paths.values():
@@ -543,7 +484,6 @@ def render_classified_mask(paths: Dict[str, SVGPath], output_width: int, output_
 
 def classify_svg_file(svg_path: str, output_mask_path: Optional[str] = None,
                        output_width: int = 512, output_height: int = 512) -> np.ndarray:
-    """Phân loại 1 file SVG, tuỳ chọn lưu ảnh mask minh hoạ."""
     mask = render_mask(svg_path, output_width, output_height)
 
     if output_mask_path:
@@ -564,8 +504,7 @@ def _classify_with_convert_rule(path_obj: SVGPath, outer_border_id: Optional[str
                                 physical_width_mm: float,
                                 threshold_mm: float) -> str:
     """
-    Rule tương thích với scripts/data_prep/convert_single_svg.py:
-    ưu tiên cùng cách gán satin/fill tại bước convert PNG -> SVG.
+    Rule tương thích với scripts/data_prep/convert_single_svg.py
     """
     geom = path_obj.geometry
     if geom is None or geom.is_empty:
@@ -604,7 +543,7 @@ def _classify_with_convert_rule(path_obj: SVGPath, outer_border_id: Optional[str
         and (hull_area_px / canvas_area) > 0.4
     )
 
-    if is_outermost and is_hollow and thickness_mm <= 8.0:
+    if is_outermost and is_hollow and thickness_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
         return "satin"
     if is_hollow:
         return "fill" if thickness_mm >= threshold_mm else "satin"
@@ -619,13 +558,6 @@ def _classify_with_convert_rule(path_obj: SVGPath, outer_border_id: Optional[str
 
 def build_convert_rule_metadata(svg_path: str, physical_width_mm: float = 80.0,
                                 threshold_mm: float = 2.0) -> Dict[str, str]:
-    """
-    Trả về {path_id: "satin"/"fill"} theo cùng rule với bước convert PNG -> SVG.
-
-    Dùng cho training fallback khi path chưa có inkscape:label. Nếu SVG đã được
-    convert bằng convert_single_svg.py thì label có sẵn vẫn là nguồn đúng nhất;
-    hàm này chỉ đảm bảo path thiếu label không bị rơi sang bộ rule khác.
-    """
     root, paths, _ = load_svg(svg_path)
     if not paths:
         return {}
@@ -661,24 +593,7 @@ def build_convert_rule_metadata(svg_path: str, physical_width_mm: float = 80.0,
 
 
 def build_geometric_metadata(svg_path: str, supersample_factor: int = 2) -> Dict[str, str]:
-    """
-    Trả về {path_id: "satin"/"fill"} dựa HOÀN TOÀN trên hình học (rule cứng
-    ở trên), cùng format với metadata mà dataset_svg.parse_svg_metadata()
-    và create_label_mask() đang dùng (dựa vào Inkscape label thủ công).
-
-    Dùng hàm này để tự động sinh nhãn train, thay vì phải gán label thủ
-    công cho từng path trong Inkscape.
-
-    Cách hard-code vào training (dataset_svg.py):
-
-        from src.svg_path_classifier import build_geometric_metadata
-
-        # trong EmbroideryDatasetSVG._get_metadata_and_mask, thay:
-        #     _, metadata = parse_svg_metadata(svg_path)
-        # bằng:
-        metadata = build_geometric_metadata(svg_path)
-    """
-    root, paths, pixel_per_cm = load_svg(svg_path)
+    root, paths, pixel_per_mm = load_svg(svg_path)
     if not paths:
         return {}
 
@@ -689,11 +604,11 @@ def build_geometric_metadata(svg_path: str, supersample_factor: int = 2) -> Dict
 
     metadata: Dict[str, str] = {}
     for pid, path_obj in paths.items():
-        width_cm = estimate_path_width_cm(path_obj, svg_width, svg_height,
-                                           pixel_per_cm, supersample_factor)
-        path_obj.width_cm = width_cm
-        path_obj.label = classify_path(path_obj, width_cm)
-        metadata[pid] = path_obj.label.lower()  # "satin" / "fill"
+        width_mm = estimate_path_width_mm(path_obj, svg_width, svg_height,
+                                           pixel_per_mm, supersample_factor)
+        path_obj.width_mm = width_mm
+        path_obj.label = classify_path(path_obj, width_mm)
+        metadata[pid] = path_obj.label.lower()  
 
     return metadata
 
@@ -717,9 +632,6 @@ if __name__ == "__main__":
 
 
 def inspect_svg_scale(svg_path: str) -> None:
-    """Debug: in ra các giá trị thô (width/height/viewBox) và pixel_per_cm
-    được suy ra, để kiểm tra xem SVG có đơn vị thực hay đang bị fallback
-    về DEFAULT_REAL_WIDTH_CM."""
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
@@ -735,11 +647,11 @@ def inspect_svg_scale(svg_path: str) -> None:
     value, unit = parse_dimension(width_attr) if width_attr else (None, None)
     print(f"  parsed width value/unit: {value} / {unit}")
 
-    pixel_per_cm = calculate_pixel_per_cm(root)
-    print(f"  => pixel_per_cm = {pixel_per_cm:.4f}")
+    pixel_per_mm = calculate_pixel_per_mm(root)
+    print(f"  => pixel_per_mm = {pixel_per_mm:.4f}")
 
     if unit is None:
         print(f"  [CANH BAO] Khong tim thay don vi thuc (cm/mm/in) tren "
               f"thuoc tinh width -> dang FALLBACK ve gia dinh logo rong "
-              f"{DEFAULT_REAL_WIDTH_CM}cm. Neu kich thuoc that su khac, "
-              f"moi phep do width_cm phia sau se SAI theo ti le tuong ung.")
+              f"{DEFAULT_REAL_WIDTH_MM}mm. Neu kich thuoc that su khac, "
+              f"moi phep do width phia sau se SAI theo ti le tuong ung.")

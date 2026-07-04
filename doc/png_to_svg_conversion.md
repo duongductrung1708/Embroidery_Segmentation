@@ -384,6 +384,13 @@ python3 svg_to_png_with_labels.py --svg-dir path/to/svg --output-img path/to/ima
 
 Nguồn nhãn cuối cùng khi train logo nằm ở `src/dataset_svg.py::build_hybrid_metadata`.
 
+**Đơn vị hiện tại: Millimet (mm).**
+
+- `convert_single_svg.py` dùng `physical_width_mm=80.0` và `threshold_mm=2.0`.
+- `svg_path_classifier.py` cũng đã chuẩn hóa fallback về `mm`: `DEFAULT_REAL_WIDTH_MM=80.0`, `SATIN_WIDTH_THRESHOLD_MM=2.0`, `OUTER_BORDER_MAX_THICKNESS_MM=8.0`.
+- Nếu SVG có đơn vị thật trong `width` (`mm`, `cm`, `in`, `px`, ...), classifier quy đổi về `mm`.
+- Nếu SVG không có đơn vị thật, hệ thống giả định logo rộng `80mm`. Khi kích thước thực khác 80mm, các ngưỡng thickness sẽ lệch theo tỉ lệ tương ứng.
+
 Thứ tự ưu tiên:
 
 1. Nếu path đã có `inkscape:label="fill"` hoặc `inkscape:label="satin"` từ bước convert/manual thì train dùng trực tiếp label đó.
@@ -398,6 +405,13 @@ Rule fallback tương thích convert:
 - Path dài/hẹp (`aspect_ratio > 4`) và `thickness <= 4mm` -> `satin`
 - Khối đặc lớn và dày `>= 2mm` -> `fill`
 - Fallback cuối theo ngưỡng thickness `2mm`
+
+Đánh giá độ chắc chắn của rule:
+
+- Rule hiện tại đủ chắc để làm baseline training vì train ưu tiên label đã được convert/manual gắn sẵn; fallback chỉ chạy khi path thiếu label.
+- Các case đã được bảo vệ tốt hơn bản rule cũ: viền ngoài lớn nhưng quá dày không bị ép thành satin, chữ/hình rỗng như O/A được xét theo thickness, và path dài hẹp được ưu tiên satin.
+- Rule vẫn là heuristic, chưa phải ground truth tuyệt đối. Các case cần review thủ công gồm logo không đúng kích thước giả định `80mm`, mảng fill rất mảnh, chữ quá dày, path bị vector hóa lỗi/hole sai, hoặc shape đặc nhưng solidity thấp do nhiễu.
+- Khi cần chắc chắn hơn, ưu tiên sửa `inkscape:label` trực tiếp trong SVG; train sẽ dùng label này trước mọi fallback rule.
 
 ### Cải tiến Training (v8)
 
