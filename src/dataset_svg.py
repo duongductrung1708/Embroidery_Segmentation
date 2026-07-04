@@ -32,15 +32,12 @@ except ImportError:
     except ImportError:
         from svg_path_classifier import build_convert_rule_metadata
 
-SATIN_COLORS = [
+ALL_COLORS = [
     "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF",
-    "#FFA500", "#800080", "#FFC0CB", "#FFD700", "#C0C0C0", "#A52A2A"
-]
-
-FILL_COLORS = [
+    "#FFA500", "#800080", "#FFC0CB", "#FFD700", "#C0C0C0", "#A52A2A",
     "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD",
     "#98D8C8", "#F7DC6F", "#BB8FCE", "#85C1E9", "#F8B500", "#FF6F61",
-    "#88B04B", "#F7CAC9", "#92A8D1", "#B565A7"
+    "#88B04B", "#F7CAC9", "#92A8D1", "#B565A7", "#000000", "#FFFFFF"
 ]
 
 LABEL_BACKGROUND = 0
@@ -148,24 +145,14 @@ def augment_svg_colors(root: ET.Element, metadata: Dict[str, str], seed: int = N
     if seed is not None:
         random.seed(seed)
     
-    used_satin_colors = set()
-    used_fill_colors = set()
+    used_colors = set()
     
     for child in root.iter():
         tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
         if tag == "path":
-            path_id = child.get("id")
-            stitch_type = metadata.get(path_id, "fill")
-            stitch_type = stitch_type.strip().lower() if stitch_type else "fill"
-            
-            if stitch_type == "satin":
-                available_satin = [c for c in SATIN_COLORS if c not in used_satin_colors]
-                new_color = random.choice(available_satin) if available_satin else random.choice(SATIN_COLORS)
-                used_satin_colors.add(new_color)
-            else:
-                available_fill = [c for c in FILL_COLORS if c not in used_fill_colors]
-                new_color = random.choice(available_fill) if available_fill else random.choice(FILL_COLORS)
-                used_fill_colors.add(new_color)
+            available_colors = [c for c in ALL_COLORS if c not in used_colors]
+            new_color = random.choice(available_colors) if available_colors else random.choice(ALL_COLORS)
+            used_colors.add(new_color)
             
             child.set("fill", new_color)
             style = child.get("style")

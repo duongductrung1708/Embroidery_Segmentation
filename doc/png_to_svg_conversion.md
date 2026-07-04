@@ -443,6 +443,8 @@ Rule fallback tương thích convert:
 
 - Bỏ ElasticTransform (logo không nên bị biến dạng hình học)
 - Giữ HorizontalFlip, VerticalFlip, Affine
+- Color augmentation dùng chung `ALL_COLORS` cho cả Fill và Satin, không tách palette theo class
+- Thêm cả đen/trắng vào pool màu để model không học shortcut brightness/color thay cho hình học
 
 **Optimizer:**
 
