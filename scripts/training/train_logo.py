@@ -90,8 +90,8 @@ def main():
             fill_mask=0,
             p=0.7
         ),
-        A.ElasticTransform(alpha=120, sigma=6, p=0.3),
-        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+        # A.ElasticTransform(alpha=120, sigma=6, p=0.3),
+        # A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
         A.CoarseDropout(
             num_holes_range=(4, 8), hole_height_range=(10, 30),
             hole_width_range=(10, 30), fill=0, p=0.3
