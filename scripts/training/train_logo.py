@@ -42,6 +42,7 @@ def main():
     BATCH_SIZE = 2
     EFFECTIVE_BATCH_SIZE = 4
     GRAD_ACCUM_STEPS = max(1, EFFECTIVE_BATCH_SIZE // BATCH_SIZE)
+    LOG_IMAGE_COUNT = 4
     NUM_CLASSES = 3
 
     # ==========================================
@@ -138,7 +139,7 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=train_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=val_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
-    tracking_loader = DataLoader(tracking_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    tracking_loader = DataLoader(tracking_dataset, batch_size=LOG_IMAGE_COUNT, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
     print(f"Number of validation images (Full Scale): {len(val_dataset)}")
@@ -158,6 +159,7 @@ def main():
             "batch_size": BATCH_SIZE,
             "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
             "grad_accum_steps": GRAD_ACCUM_STEPS,
+            "log_image_count": LOG_IMAGE_COUNT,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
             "input_channels": 4, # Ghi chú cấu hình 4 kênh
@@ -227,19 +229,15 @@ def main():
         running_train_loss = 0.0
         all_train_preds = []
         all_train_masks = []
-        train_rgb_samples = []
-        train_mask_samples = []
-        train_pred_samples = []
+        train_rgb_sample_chunks = []
+        train_mask_sample_chunks = []
+        train_pred_sample_chunks = []
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
         optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (images, masks, rgb_images) in enumerate(loop):
             images, masks = images.to(device), masks.to(device)
-           
-            if batch_idx == 0:
-                train_rgb_samples = rgb_images[:min(4, rgb_images.size(0))]
-                train_mask_samples = masks[:min(4, masks.size(0))]
            
             with torch.autocast(device_type=device.type):
                 outputs = model(images)  
@@ -274,8 +272,12 @@ def main():
                 preds = torch.argmax(outputs[0], dim=1)
                 all_train_preds.append(preds.cpu())
                 all_train_masks.append(masks.cpu())
-                if batch_idx == 0:
-                    train_pred_samples = preds[:min(4, preds.size(0))]
+                logged_so_far = sum(chunk.size(0) for chunk in train_rgb_sample_chunks)
+                if logged_so_far < LOG_IMAGE_COUNT:
+                    take = min(LOG_IMAGE_COUNT - logged_so_far, rgb_images.size(0))
+                    train_rgb_sample_chunks.append(rgb_images[:take].cpu())
+                    train_mask_sample_chunks.append(masks[:take].cpu())
+                    train_pred_sample_chunks.append(preds[:take].cpu())
 
         avg_train_loss = running_train_loss / len(train_loader)
         all_train_preds = torch.cat(all_train_preds, dim=0)
@@ -290,8 +292,11 @@ def main():
         train_iou_satin = train_metrics['iou_satin']
        
         train_wandb_images = []
-        if len(train_rgb_samples) > 0 and len(train_pred_samples) > 0:
-            for i in range(min(4, len(train_rgb_samples))):
+        if train_rgb_sample_chunks and train_pred_sample_chunks:
+            train_rgb_samples = torch.cat(train_rgb_sample_chunks, dim=0)
+            train_mask_samples = torch.cat(train_mask_sample_chunks, dim=0)
+            train_pred_samples = torch.cat(train_pred_sample_chunks, dim=0)
+            for i in range(min(LOG_IMAGE_COUNT, train_rgb_samples.size(0))):
                 rgb_np = train_rgb_samples[i].numpy()
                 true_mask_np = train_mask_samples[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = train_pred_samples[i].cpu().numpy().astype(np.uint8)
@@ -342,7 +347,7 @@ def main():
             fixed_preds = torch.argmax(fixed_outputs[0], dim=1)
 
             wandb_log_images = []
-            num_images = min(4, fixed_val_images.size(0))
+            num_images = min(LOG_IMAGE_COUNT, fixed_val_images.size(0))
             for i in range(num_images):
                 rgb_np = fixed_val_rgb[i].numpy()
                
@@ -412,7 +417,7 @@ def main():
             "IoU_Fill/Val": val_iou_fill,
             "IoU_Satin/Train": train_iou_satin,
             "IoU_Satin/Val": val_iou_satin,
-            "Train_Images": train_wandb_images if len(train_rgb_samples) > 0 else None,
+            "Train_Images": train_wandb_images if len(train_wandb_images) > 0 else None,
             "Validation_Images": wandb_log_images
         })
 
