@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.dataset_svg import EmbroideryDatasetSVG
 from src.model import U2NET
-from src.utils_logo import GeneralizedDiceLoss, FocalLoss, get_boundary_mask, calculate_metrics_torchmetrics, seed_everything
+from src.utils_logo import GeneralizedDiceLoss, FocalLoss, get_boundary_mask, calculate_metrics_torchmetrics, seed_everything, compute_spatial_weight_map
 
 
 def _loader_workers(dataset_len: int, cap: int) -> int:
@@ -45,25 +45,9 @@ def main():
     LOG_IMAGE_COUNT = 4
     NUM_CLASSES = 3
 
-    # ==========================================
-    # QUY TẮC NỘI SUY (interpolation):
-    #   - ẢNH (RGBA, giá trị liên tục 0-255)  -> INTER_LINEAR
-    #     Cho phép pha trộn màu giữa các pixel lân cận khi xoay/scale,
-    #     giữ được cạnh mượt thay vì răng cưa.
-    #   - MASK (nhãn rời rạc 0=BG, 1=Fill, 2=Satin) -> INTER_NEAREST BẮT BUỘC
-    #     Không được nội suy tuyến tính, vì trung bình cộng của 2 class index
-    #     (ví dụ (1+2)/2 = 1.5) không phải 1 nhãn hợp lệ nào cả -> sẽ tạo ra
-    #     "nhãn ma" ở biên giữa Fill/Satin, làm hỏng ground truth.
-    #
-    # Albumentations 2.x đã tách sẵn 2 tham số interpolation/mask_interpolation
-    # cho các transform resize/affine, với mask_interpolation mặc định là
-    # INTER_NEAREST. Ở đây set TƯỜNG MINH cả 2 để không phụ thuộc default
-    # ngầm (phòng khi nâng cấp lib sau này đổi default).
-    # ==========================================
     IMG_INTERPOLATION = cv2.INTER_LINEAR
     MASK_INTERPOLATION = cv2.INTER_NEAREST
 
-    # Lưu ý: A.PadIfNeeded với fill=0 trên ảnh RGBA sẽ chèn padding là (0,0,0,0) - tức là viền trong suốt
     train_transform = A.Compose([
         A.LongestMaxSize(
             max_size=TEMP_IMAGE_SIZE,
@@ -77,6 +61,19 @@ def main():
             fill=0,
             fill_mask=0
         ),
+        
+        # --- CHIẾN LƯỢC KÍNH LÚP (CHỐNG TRÀN CHỮ) ---
+        A.RandomResizedCrop(
+            height=TEMP_IMAGE_SIZE, 
+            width=TEMP_IMAGE_SIZE, 
+            scale=(0.5, 1.0), 
+            ratio=(0.8, 1.2),
+            interpolation=IMG_INTERPOLATION,
+            mask_interpolation=MASK_INTERPOLATION,
+            p=0.5 
+        ),
+        # ---------------------------------------------
+        
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Affine(
@@ -90,14 +87,12 @@ def main():
             fill_mask=0,
             p=0.7
         ),
-        # A.ElasticTransform(alpha=120, sigma=6, p=0.3),
-        # A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+        A.ElasticTransform(alpha=120, sigma=6, p=0.3),
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
         A.CoarseDropout(
             num_holes_range=(4, 8), hole_height_range=(10, 30),
             hole_width_range=(10, 30), fill=0, p=0.3
         ),
-        # A.GaussNoise(std_range=(0.01, 0.02), p=0.3),
-        # A.GaussianBlur(blur_limit=(3, 5), p=0.2),
         ToTensorV2()
     ])
 
@@ -162,7 +157,7 @@ def main():
             "log_image_count": LOG_IMAGE_COUNT,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
-            "input_channels": 4, # Ghi chú cấu hình 4 kênh
+            "input_channels": 4, 
             "fill_weight": 2,
             "satin_weight": 5,
             "supersample_factor": 2,
@@ -183,17 +178,17 @@ def main():
     # ==========================================
     model = U2NET(in_ch=4, out_ch=NUM_CLASSES).to(device)
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
-   
+    
     focal_loss_fn = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0)
     dice_loss_fn = GeneralizedDiceLoss(num_classes=NUM_CLASSES)
     bce_boundary_fn = nn.BCEWithLogitsLoss()
-   
+    
     deep_supervision_weights = [1.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.1]
-   
+    
     LAST_CHECKPOINT_PATH = "checkpoints/logo/u2net_logo_last.pth"
     BEST_MODEL_PATH = "checkpoints/logo/u2net_logo_best.pth"
     os.makedirs(os.path.dirname(LAST_CHECKPOINT_PATH), exist_ok=True)
-   
+    
     start_epoch = 0
     best_val_f1 = 0.0
     active_lr = config.learning_rate
@@ -238,17 +233,20 @@ def main():
 
         for batch_idx, (images, masks, rgb_images) in enumerate(loop):
             images, masks = images.to(device), masks.to(device)
-           
+            
             with torch.autocast(device_type=device.type):
                 outputs = model(images)  
                 boundary_targets = get_boundary_mask(masks, device, num_classes=NUM_CLASSES)
-               
+                
+                # --- THÊM PHẠT KHÔNG GIAN (SPATIAL WEIGHTS) ---
+                spatial_weights = compute_spatial_weight_map(masks)
+                
                 loss = 0.0
                 for idx, d in enumerate(outputs):
                     weight = deep_supervision_weights[idx]
-                    seg_loss = focal_loss_fn(d, masks) + dice_loss_fn(d, masks)
+                    seg_loss = focal_loss_fn(d, masks, spatial_weights) + dice_loss_fn(d, masks)
                     loss += weight * seg_loss
-               
+                
                 boundary_loss = 0.0
                 for class_idx in range(NUM_CLASSES):
                     boundary_loss += bce_boundary_fn(outputs[0][:, class_idx, :, :], boundary_targets[:, class_idx, :, :])
@@ -267,7 +265,7 @@ def main():
 
             current_lr = optimizer.param_groups[0]['lr']
             loop.set_postfix(loss=loss.item(), lr=current_lr)
-           
+            
             with torch.no_grad():
                 preds = torch.argmax(outputs[0], dim=1)
                 all_train_preds.append(preds.cpu())
@@ -282,15 +280,14 @@ def main():
         avg_train_loss = running_train_loss / len(train_loader)
         all_train_preds = torch.cat(all_train_preds, dim=0)
         all_train_masks = torch.cat(all_train_masks, dim=0)
-       
-        # Lấy metrics từ Torchmetrics (Train)
+        
         train_metrics = calculate_metrics_torchmetrics(all_train_preds, all_train_masks, num_classes=NUM_CLASSES)
         train_macro_f1 = train_metrics['macro_f1']
         train_mean_iou = train_metrics['mean_iou']
         train_iou_bg = train_metrics['iou_background']
         train_iou_fill = train_metrics['iou_fill']
         train_iou_satin = train_metrics['iou_satin']
-       
+        
         train_wandb_images = []
         if train_rgb_sample_chunks and train_pred_sample_chunks:
             train_rgb_samples = torch.cat(train_rgb_sample_chunks, dim=0)
@@ -300,17 +297,15 @@ def main():
                 rgb_np = train_rgb_samples[i].numpy()
                 true_mask_np = train_mask_samples[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = train_pred_samples[i].cpu().numpy().astype(np.uint8)
-               
-                # Create colored masks for visualization
+                
                 true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
                 pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
-               
-                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
+                
                 true_mask_colored[true_mask_np == 1] = [0, 255, 255]
                 true_mask_colored[true_mask_np == 2] = [255, 0, 255]
                 pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
                 pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
-               
+                
                 train_wandb_images.append(wandb.Image(rgb_np, caption=f"Train Input #{i+1}"))
                 train_wandb_images.append(wandb.Image(true_mask_colored, caption=f"Train GT #{i+1}"))
                 train_wandb_images.append(wandb.Image(pred_mask_colored, caption=f"Train Pred #{i+1}"))
@@ -320,62 +315,66 @@ def main():
         running_val_loss = 0.0
         all_val_preds = []
         all_val_masks = []
-       
+        
         with torch.no_grad():
             for val_images, val_masks, _ in val_loader:
                 val_images, val_masks = val_images.to(device), val_masks.to(device)
-                val_outputs = model(val_images)
-                val_boundary_targets = get_boundary_mask(val_masks, device, num_classes=NUM_CLASSES)
-               
-                val_loss = 0.0
-                for idx, d in enumerate(val_outputs):
-                    weight = deep_supervision_weights[idx]
-                    val_loss += weight * (focal_loss_fn(d, val_masks) + dice_loss_fn(d, val_masks))
-               
-                v_boundary_loss = 0.0
-                for class_idx in range(NUM_CLASSES):
-                    v_boundary_loss += bce_boundary_fn(val_outputs[0][:, class_idx, :, :], val_boundary_targets[:, class_idx, :, :])
-                val_loss += 0.5 * (v_boundary_loss / NUM_CLASSES)
-                   
+                
+                with torch.autocast(device_type=device.type):
+                    val_outputs = model(val_images)
+                    val_boundary_targets = get_boundary_mask(val_masks, device, num_classes=NUM_CLASSES)
+                    
+                    # --- THÊM PHẠT KHÔNG GIAN CHO VAL ---
+                    val_spatial_weights = compute_spatial_weight_map(val_masks)
+                    
+                    val_loss = 0.0
+                    for idx, d in enumerate(val_outputs):
+                        weight = deep_supervision_weights[idx]
+                        val_loss += weight * (focal_loss_fn(d, val_masks, val_spatial_weights) + dice_loss_fn(d, val_masks))
+                    
+                    v_boundary_loss = 0.0
+                    for class_idx in range(NUM_CLASSES):
+                        v_boundary_loss += bce_boundary_fn(val_outputs[0][:, class_idx, :, :], val_boundary_targets[:, class_idx, :, :])
+                    val_loss += 0.5 * (v_boundary_loss / NUM_CLASSES)
+                    
                 running_val_loss += val_loss.item()
                 preds = torch.argmax(val_outputs[0], dim=1)
                 all_val_preds.append(preds.cpu())
                 all_val_masks.append(val_masks.cpu())
 
             # --- DỰ ĐOÁN ẢNH WANDB PHÔNG NỀN ẢO ---
-            fixed_outputs = model(fixed_val_images)
+            with torch.autocast(device_type=device.type):
+                fixed_outputs = model(fixed_val_images)
             fixed_preds = torch.argmax(fixed_outputs[0], dim=1)
 
             wandb_log_images = []
             num_images = min(LOG_IMAGE_COUNT, fixed_val_images.size(0))
             for i in range(num_images):
                 rgb_np = fixed_val_rgb[i].numpy()
-               
+                
                 img_np = fixed_val_images[i].cpu().permute(1, 2, 0).numpy()
                 if img_np.max() <= 1.0:
                     img_np = (img_np * 255).astype(np.uint8)
                 else:
                     img_np = img_np.astype(np.uint8)
-                   
+                    
                 rgb_fg = img_np[:, :, :3]
                 alpha = img_np[:, :, 3:4] / 255.0
-               
+                
                 bg_color = np.full_like(rgb_fg, 128)
                 img_display = (rgb_fg * alpha + bg_color * (1 - alpha)).astype(np.uint8)
-               
+                
                 true_mask_np = fixed_val_masks[i].cpu().numpy().astype(np.uint8)
                 pred_mask_np = fixed_preds[i].cpu().numpy().astype(np.uint8)
-               
-                # Create colored masks for visualization
+                
                 true_mask_colored = np.zeros((true_mask_np.shape[0], true_mask_np.shape[1], 3), dtype=np.uint8)
                 pred_mask_colored = np.zeros((pred_mask_np.shape[0], pred_mask_np.shape[1], 3), dtype=np.uint8)
-               
-                # Fill = Cyan (0, 255, 255), Satin = Magenta (255, 0, 255)
+                
                 true_mask_colored[true_mask_np == 1] = [0, 255, 255]
                 true_mask_colored[true_mask_np == 2] = [255, 0, 255]
                 pred_mask_colored[pred_mask_np == 1] = [0, 255, 255]
                 pred_mask_colored[pred_mask_np == 2] = [255, 0, 255]
-               
+                
                 wandb_log_images.append(wandb.Image(rgb_np, caption=f"Val Input #{i+1}"))
                 wandb_log_images.append(wandb.Image(true_mask_colored, caption=f"Val GT #{i+1}"))
                 wandb_log_images.append(wandb.Image(pred_mask_colored, caption=f"Val Pred #{i+1}"))
@@ -383,8 +382,7 @@ def main():
         avg_val_loss = running_val_loss / len(val_loader)
         all_val_preds = torch.cat(all_val_preds, dim=0)
         all_val_masks = torch.cat(all_val_masks, dim=0)
-       
-        # Lấy metrics từ Torchmetrics (Validation)
+        
         val_metrics = calculate_metrics_torchmetrics(all_val_preds, all_val_masks, num_classes=NUM_CLASSES)
         val_macro_f1 = val_metrics['macro_f1']
         val_mean_iou = val_metrics['mean_iou']
@@ -394,14 +392,12 @@ def main():
 
         scheduler.step()
 
-        # In log ra Terminal
         print(f"\n[Epoch {epoch+1}] Bao cao U-2-NET (4 Channels):")
         print(f"   Train | Loss: {avg_train_loss:.4f} | Macro F1: {train_macro_f1:.4f} | Mean IoU: {train_mean_iou:.4f}")
         print(f"          IoU - BG: {train_iou_bg:.4f} | Fill: {train_iou_fill:.4f} | Satin: {train_iou_satin:.4f}")
         print(f"   Val   | Loss: {avg_val_loss:.4f} | Macro F1: {val_macro_f1:.4f} | Mean IoU: {val_mean_iou:.4f}")
         print(f"          IoU - BG: {val_iou_bg:.4f} | Fill: {val_iou_fill:.4f} | Satin: {val_iou_satin:.4f}\n")
 
-        # Đẩy log lên WandB
         wandb.log({
             "epoch": epoch + 1,
             "learning_rate": current_lr,
