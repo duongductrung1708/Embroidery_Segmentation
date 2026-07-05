@@ -64,8 +64,7 @@ def main():
         
         # --- CHIẾN LƯỢC KÍNH LÚP (CHỐNG TRÀN CHỮ) ---
         A.RandomResizedCrop(
-            height=TEMP_IMAGE_SIZE, 
-            width=TEMP_IMAGE_SIZE, 
+            size=(TEMP_IMAGE_SIZE, TEMP_IMAGE_SIZE),
             scale=(0.5, 1.0), 
             ratio=(0.8, 1.2),
             interpolation=IMG_INTERPOLATION,
