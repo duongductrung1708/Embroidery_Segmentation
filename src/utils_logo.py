@@ -127,7 +127,7 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.label_smoothing = label_smoothing
 
-    def forward(self, inputs, targets):
+    def forward(self, inputs, targets, spatial_weights=None):
         # inputs: [Batch, Class, H, W], targets: [Batch, H, W]
         ce_loss = nn.functional.cross_entropy(
             inputs, targets, weight=self.weight, 
@@ -135,6 +135,11 @@ class FocalLoss(nn.Module):
         )
         pt = torch.exp(-ce_loss)
         focal_loss = ((1 - pt) ** self.gamma * ce_loss)
+        
+        # --- NHÂN TRỌNG SỐ KHÔNG GIAN (SPATIAL BOUNDARY PENALTY) ---
+        if spatial_weights is not None:
+            focal_loss = focal_loss * spatial_weights
+            
         return focal_loss.mean()
 
 def get_boundary_mask(masks, device, num_classes=3):
@@ -161,10 +166,42 @@ def get_boundary_mask(masks, device, num_classes=3):
             mask_255 = (class_mask * 255).astype(np.uint8)
             edges = cv2.Canny(mask_255, 100, 200)
             
-            # Dilate boundary để làm dày đường biên
+            # Dilate boundary để làm dày đường biên (Đã hạ xuống 3x3 để giữ chữ nét mảnh)
             kernel = np.ones((3, 3), np.uint8)
             edges_dilated = cv2.dilate(edges, kernel, iterations=1)
             
             boundaries[i, class_idx] = (edges_dilated > 0).astype(np.float32)
     
     return torch.from_numpy(boundaries).to(device)
+
+def compute_spatial_weight_map(masks, base_weight=1.0, edge_weight=5.0, kernel_size=5):
+    """
+    Tính toán bản đồ trọng số không gian. 
+    Các pixel nằm ở vùng biên giữa các màu (ví dụ: viền chữ, nét Satin) sẽ bị phạt nặng hơn.
+    
+    Args:
+        masks: [Batch, H, W] - Ground truth (class indices)
+        base_weight: Trọng số gốc cho các điểm ảnh bình thường.
+        edge_weight: Trọng số phạt cho các điểm ảnh nằm trên ranh giới.
+        kernel_size: Độ dày của vùng ranh giới muốn phạt. 
+    Returns:
+        weight_map: [Batch, H, W] - Bản đồ trọng số
+    """
+    device = masks.device
+    masks_np = masks.cpu().numpy().astype(np.uint8)
+    batch_size, h, w = masks_np.shape
+    
+    weight_map = np.full((batch_size, h, w), base_weight, dtype=np.float32)
+    
+    # Kernel để làm dày vùng phạt ranh giới
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    
+    for i in range(batch_size):
+        # Trích xuất ranh giới bằng thuật toán Gradient (Morphological Gradient)
+        grad = cv2.morphologyEx(masks_np[i], cv2.MORPH_GRADIENT, kernel)
+        
+        # Những pixel nào có gradient > 0 (có sự thay đổi màu sắc) sẽ bị áp trọng số phạt
+        edges = (grad > 0)
+        weight_map[i][edges] = edge_weight
+        
+    return torch.from_numpy(weight_map).to(device)
