@@ -4,7 +4,7 @@ from src.dataset_svg import EmbroideryDatasetSVG
 
 # 1. Khởi tạo Dataset và load ảnh (với supersample_factor=2 để phóng to)
 ds = EmbroideryDatasetSVG(
-    svg_dir_or_paths=["data/svg/logo/110.svg"], 
+    svg_dir_or_paths=["data/svg/logo/23.svg"], 
     transform=None, 
     target_size=768, 
     supersample_factor=2
