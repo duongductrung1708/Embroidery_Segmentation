@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,8 +32,29 @@ def _loader_workers(dataset_len: int, cap: int) -> int:
     return max(1, min(cap, cpu_count, dataset_len))
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train U2-Net cho embroidery segmentation. "
+                    "--epochs là TỔNG SỐ EPOCH MỤC TIÊU (không phải số epoch train "
+                    "thêm) -- nếu resume từ checkpoint đã đạt mốc này, phải tăng "
+                    "--epochs lên rồi chạy lại mới train tiếp được."
+    )
+    parser.add_argument("--epochs", type=int, default=200,
+                         help="Tổng số epoch mục tiêu TUYỆT ĐỐI (default: 200). Ví dụ: nếu "
+                              "checkpoint đã train xong 200 epoch và bạn muốn train "
+                              "thêm 100 epoch nữa, chạy: --epochs 300")
+    parser.add_argument("--add-epochs", type=int, default=None,
+                         help="Cách khác, TIỆN HƠN --epochs: chỉ định số epoch MUỐN TRAIN "
+                              "THÊM kể từ checkpoint hiện tại, không cần tự tính số tuyệt "
+                              "đối. Nếu set, override --epochs (target = so_epoch_da_train "
+                              "+ add_epochs). Ví dụ: đã train xong bao nhiêu cũng được, cứ "
+                              "--add-epochs 50 là train thêm đúng 50 epoch nữa.")
+    return parser.parse_args()
+
+
 def main():
     seed_everything(42)
+    args = parse_args()
 
     # ==========================================
     # 1. CẤU HÌNH HỆ THỐNG
@@ -44,6 +66,8 @@ def main():
     GRAD_ACCUM_STEPS = max(1, EFFECTIVE_BATCH_SIZE // BATCH_SIZE)
     LOG_IMAGE_COUNT = 4
     NUM_CLASSES = 3
+    TARGET_EPOCHS = args.epochs  # giá trị tạm thời -- có thể bị --add-epochs ghi đè
+                                  # sau khi biết checkpoint đã train tới epoch nào (bên dưới)
 
     IMG_INTERPOLATION = cv2.INTER_LINEAR
     MASK_INTERPOLATION = cv2.INTER_NEAREST
@@ -61,18 +85,18 @@ def main():
             fill=0,
             fill_mask=0
         ),
-        
+
         # --- CHIẾN LƯỢC KÍNH LÚP (CHỐNG TRÀN CHỮ) ---
         A.RandomResizedCrop(
             size=(TEMP_IMAGE_SIZE, TEMP_IMAGE_SIZE),
-            scale=(0.5, 1.0), 
+            scale=(0.5, 1.0),
             ratio=(0.8, 1.2),
             interpolation=IMG_INTERPOLATION,
             mask_interpolation=MASK_INTERPOLATION,
-            p=0.5 
+            p=0.5
         ),
         # ---------------------------------------------
-        
+
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Affine(
@@ -140,26 +164,74 @@ def main():
     print(f"DataLoader workers: train={train_workers}, val={val_workers}")
 
     # ==========================================
-    # 3. KHỞI TẠO WANDB & THIẾT BỊ
+    # 3. CHUẨN BỊ CHECKPOINT PATH & KIỂM TRA SỚM
+    #    (kiểm tra TRƯỚC khi khởi tạo model/wandb -- tránh tốn thời gian
+    #    load model + mở 1 wandb run mới rồi mới phát hiện chẳng train
+    #    được gì vì đã đạt target_epochs)
+    # ==========================================
+    LAST_CHECKPOINT_PATH = "checkpoints/logo/u2net_logo_last.pth"
+    BEST_MODEL_PATH = "checkpoints/logo/u2net_logo_best.pth"
+    os.makedirs(os.path.dirname(LAST_CHECKPOINT_PATH), exist_ok=True)
+
+    start_epoch = 0
+    best_val_f1 = 0.0
+    checkpoint_to_resume = None
+
+    if os.path.exists(LAST_CHECKPOINT_PATH):
+        device_probe = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+        try:
+            checkpoint_to_resume = torch.load(LAST_CHECKPOINT_PATH, map_location=device_probe, weights_only=False)
+            start_epoch = checkpoint_to_resume['epoch'] + 1
+            best_val_f1 = checkpoint_to_resume.get('best_val_f1', 0.0)
+        except Exception as e:
+            print(f"\nLOI LOAD CHECKPOINT: {e}")
+            print("Vui lòng XÓA file checkpoint cũ để train lại với mô hình 4 kênh!")
+            sys.exit(1)
+
+    # Nếu dùng --add-epochs, override TARGET_EPOCHS = epoch_da_train + add_epochs.
+    # Phải làm SAU khi biết start_epoch (từ checkpoint), nên đặt ở đây chứ không
+    # phải ngay lúc parse args.
+    if args.add_epochs is not None:
+        TARGET_EPOCHS = start_epoch + args.add_epochs
+
+    print(f"Target epochs (tong so epoch muc tieu): {TARGET_EPOCHS}"
+          + (f"  (= {start_epoch} da train + {args.add_epochs} tu --add-epochs)"
+             if args.add_epochs is not None else ""))
+
+    if start_epoch >= TARGET_EPOCHS:
+        print(f"\n[DUNG] Checkpoint hiện tại đã train xong {start_epoch} epoch, "
+              f">= target_epochs hiện tại ({TARGET_EPOCHS}).")
+        print("Không có gì để train thêm với target_epochs này -- đây chính là lý do "
+              "trước đây script chạy xong ngay lập tức mà không train được gì.")
+        print(f"Muốn train tiếp, chạy lại với 1 trong 2 cách:")
+        print(f"    python {Path(__file__).name} --add-epochs 50        "
+              f"# train thêm 50 epoch nữa, không cần tự tính")
+        print(f"    python {Path(__file__).name} --epochs {start_epoch + 50}   "
+              f"# hoặc chỉ định thẳng tổng số epoch tuyệt đối")
+        sys.exit(0)
+
+    # ==========================================
+    # 4. KHỞI TẠO WANDB & THIẾT BỊ
     # ==========================================
     wandb.init(
         project="embroidery-segmentation",
-        name="logo-v8-3class-improved-rgba",        
-        config={                          
+        name="logo-v8-3class-improved-rgba",
+        config={
             "learning_rate": 1e-4,
             "architecture": "U2-Net",
             "dataset": "Logo_3Class_V2",
-            "epochs": 200,
+            "epochs": TARGET_EPOCHS,
             "batch_size": BATCH_SIZE,
             "effective_batch_size": BATCH_SIZE * GRAD_ACCUM_STEPS,
             "grad_accum_steps": GRAD_ACCUM_STEPS,
             "log_image_count": LOG_IMAGE_COUNT,
             "image_size": TEMP_IMAGE_SIZE,
             "num_classes": NUM_CLASSES,
-            "input_channels": 4, 
+            "input_channels": 4,
             "fill_weight": 2,
             "satin_weight": 5,
             "supersample_factor": 2,
+            "resumed_from_epoch": start_epoch,
         }
     )
     config = wandb.config
@@ -173,7 +245,7 @@ def main():
     fixed_val_rgb = fixed_val_batch[2]
 
     # ==========================================
-    # 4. CHUẨN BỊ BỘ NÃO U-2-NET (4 CHANNELS)
+    # 5. CHUẨN BỊ BỘ NÃO U-2-NET (4 CHANNELS)
     # ==========================================
     model = U2NET(in_ch=4, out_ch=NUM_CLASSES).to(device)
     class_weights = torch.tensor([1.0, config.fill_weight, config.satin_weight]).to(device)
@@ -183,41 +255,25 @@ def main():
     bce_boundary_fn = nn.BCEWithLogitsLoss()
     
     deep_supervision_weights = [1.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.1]
-    
-    LAST_CHECKPOINT_PATH = "checkpoints/logo/u2net_logo_last.pth"
-    BEST_MODEL_PATH = "checkpoints/logo/u2net_logo_best.pth"
-    os.makedirs(os.path.dirname(LAST_CHECKPOINT_PATH), exist_ok=True)
-    
-    start_epoch = 0
-    best_val_f1 = 0.0
-    active_lr = config.learning_rate
 
-    optimizer = optim.AdamW(model.parameters(), lr=active_lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=1e-4)
     scaler = GradScaler(device.type)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
-    if os.path.exists(LAST_CHECKPOINT_PATH):
-        try:
-            checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=device, weights_only=False)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_val_f1 = checkpoint.get('best_val_f1', 0.0)
-            print(f"-> Phuc hoi! Chay tiep tu Epoch {start_epoch + 1}.")
-        except Exception as e:
-            print(f"\nLOI LOAD CHECKPOINT: {e}")
-            print("Vui lòng XÓA file checkpoint cũ để train lại với mô hình 4 kênh!")
-            exit()
+    if checkpoint_to_resume is not None:
+        model.load_state_dict(checkpoint_to_resume['model_state_dict'])
+        optimizer.load_state_dict(checkpoint_to_resume['optimizer_state_dict'])
+        print(f"-> Phuc hoi! Chay tiep tu Epoch {start_epoch + 1} / {TARGET_EPOCHS}.")
     else:
-        print("\n[TRAIN MOI] Bat dau huan luyen U2-Net 4 Kênh...")
+        print(f"\n[TRAIN MOI] Bat dau huan luyen U2-Net 4 Kênh (target {TARGET_EPOCHS} epoch)...")
 
     EARLY_STOPPING_PATIENCE = 100
     epochs_no_improve = 0
 
     # ==========================================
-    # 5. VÒNG LẶP HUẤN LUYỆN
+    # 6. VÒNG LẶP HUẤN LUYỆN
     # ==========================================
-    for epoch in range(start_epoch, config.epochs):
+    for epoch in range(start_epoch, TARGET_EPOCHS):
         # --- PHA TRAIN ---
         model.train()
         running_train_loss = 0.0
@@ -227,7 +283,7 @@ def main():
         train_mask_sample_chunks = []
         train_pred_sample_chunks = []
 
-        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{config.epochs}] Train")
+        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{TARGET_EPOCHS}] Train")
         optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (images, masks, rgb_images) in enumerate(loop):
