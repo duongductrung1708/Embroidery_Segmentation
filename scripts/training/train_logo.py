@@ -49,13 +49,6 @@ def parse_args():
                               "đối. Nếu set, override --epochs (target = so_epoch_da_train "
                               "+ add_epochs). Ví dụ: đã train xong bao nhiêu cũng được, cứ "
                               "--add-epochs 50 là train thêm đúng 50 epoch nữa.")
-    parser.add_argument("--num-workers", type=int, default=None,
-                         help="Ép cứng số DataLoader worker (ghi đè auto-detect theo "
-                              "CPU/dataset size). Dùng --num-workers 0 để debug treo máy: "
-                              "chạy đơn tiến trình, không multiprocessing. Nếu train chạy "
-                              "bình thường với --num-workers 0 nhưng treo với worker>0, "
-                              "gần như chắc chắn là do multiprocessing kết hợp cairosvg "
-                              "(render SVG trong dataset_svg.py), không phải do model/GPU.")
     return parser.parse_args()
 
 
@@ -71,7 +64,7 @@ def main():
     BATCH_SIZE = 2
     EFFECTIVE_BATCH_SIZE = 4
     GRAD_ACCUM_STEPS = max(1, EFFECTIVE_BATCH_SIZE // BATCH_SIZE)
-    LOG_IMAGE_COUNT = 2
+    LOG_IMAGE_COUNT = 4
     NUM_CLASSES = 3
     TARGET_EPOCHS = args.epochs  # giá trị tạm thời -- có thể bị --add-epochs ghi đè
                                   # sau khi biết checkpoint đã train tới epoch nào (bên dưới)
@@ -159,29 +152,11 @@ def main():
     val_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=val_transform, crops_per_image=TEMP_CROPS, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
     tracking_dataset = EmbroideryDatasetSVG(svg_dir_or_paths="data/logo/val_svg", transform=tracking_transform, crops_per_image=1, augment_color=False, target_size=TEMP_IMAGE_SIZE, supersample_factor=2)
 
-    if args.num_workers is not None:
-        train_workers = args.num_workers
-        val_workers = args.num_workers
-    else:
-        # Cap mặc định hạ xuống 4 (thay vì 8) -- máy này từng chạy ổn định ở
-        # đúng 4 worker; cap cao hơn khiến nhiều tiến trình cùng gọi cairosvg
-        # (render SVG) đồng thời hơn, dễ gây treo. Dùng --num-workers để ép
-        # số khác nếu cần thử nghiệm.
-        train_workers = _loader_workers(len(train_dataset), cap=4)
-        val_workers = _loader_workers(len(val_dataset), cap=4)
+    train_workers = _loader_workers(len(train_dataset), cap=8)
+    val_workers = _loader_workers(len(val_dataset), cap=4)
 
-    # persistent_workers/prefetch_factor chỉ hợp lệ khi num_workers > 0 --
-    # PyTorch sẽ raise lỗi nếu bật các cờ này với num_workers=0.
-    train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=train_workers,
-        persistent_workers=(train_workers > 0), pin_memory=True,
-        prefetch_factor=2 if train_workers > 0 else None,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=val_workers,
-        persistent_workers=(val_workers > 0), pin_memory=True,
-        prefetch_factor=2 if val_workers > 0 else None,
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=train_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=val_workers, persistent_workers=True, pin_memory=True, prefetch_factor=2)
     tracking_loader = DataLoader(tracking_dataset, batch_size=LOG_IMAGE_COUNT, shuffle=False)
 
     print(f"Number of training images (Full Scale): {len(train_dataset)}")
