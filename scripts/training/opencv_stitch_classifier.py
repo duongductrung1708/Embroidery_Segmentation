@@ -1,47 +1,11 @@
+#!/usr/bin/env python3
 """
 OpenCV Stitch Classifier - Satin vs Fill (rule-based, KHÔNG train model)
 =========================================================================
 
-Bản chuyển đổi của svg_path_classifier.py, nhưng làm việc TRỰC TIẾP trên
-ảnh raster (PNG/JPG mask nhị phân hoặc grayscale), dùng thuần OpenCV +
-NumPy (không cần svgpathtools, không cần shapely).
-
-Ý tưởng:
-- Mỗi "shape" (path) trong SVG bây giờ tương ứng với 1 contour ngoài
-  (external contour) tìm được bằng cv2.findContours với mode RETR_CCOMP.
-- RETR_CCOMP chỉ trả về hierarchy 2 CẤP:
-    cấp 1 = contour ngoài (exterior),  parent = -1
-    cấp 2 = lỗ (hole) của contour ngoài đó, parent = index contour ngoài
-  -> đúng ý nghĩa "is_hollow" trong bản SVG (không cần tính nesting depth
-     bằng shapely .contains() như bản cũ).
-- Mọi phép đo (area, hull area -> solidity, aspect ratio, thickness mm)
-  đều tính trên MASK nhị phân của từng contour (kèm lỗ), y hệt cách bản
-  SVG rasterize geometry rồi đo, nên kết quả tương thích 1-1 với quy tắc
-  gốc.
-
-QUY TẮC PHÂN LOẠI (giữ nguyên y hệt bản SVG gốc, đơn vị mm quy đổi từ
-physical_width_mm giả định cho TOÀN BỘ canvas):
-
-1. Contour ngoài cùng thực sự (hull area > 40% canvas, có lỗ) và
-   độ dày <= 8.0mm -> SATIN
-2. Có lỗ (hollow) còn lại:
-   - độ dày >= threshold_mm (mặc định 2.0mm) -> FILL
-   - mỏng hơn -> SATIN
-3. Không lỗ, solidity < 0.65 (nét ngoằn ngoèo kiểu chữ S, C, M) và
-   độ dày < threshold_mm * 1.5 -> SATIN
-4. Dài/hẹp (aspect ratio > 4.0) và độ dày <= 4.0mm -> SATIN
-5. Đặc, solidity > 0.85, độ dày >= threshold_mm -> FILL
-6. Fallback: độ dày < threshold_mm -> SATIN, ngược lại -> FILL
-
-QUAN TRỌNG: physical_width_mm=80.0 là GIẢ ĐỊNH CỐ ĐỊNH cho MỌI ảnh input
-(coi như bề rộng ảnh = 80mm thực tế). Nếu dataset của bạn không đồng nhất
-kích thước thật, chỉnh lại tham số này (hoặc đo trực tiếp DPI/scale nếu có).
-
-INPUT MONG ĐỢI: ảnh grayscale hoặc nhị phân, nét thêu là vùng SÁNG (hoặc
-tối, dùng invert=True) trên nền khác màu. Nếu ảnh gốc là RGB nhiều màu
-theo từng path riêng biệt (mỗi path 1 màu), dùng hàm
-`classify_multicolor_image` bên dưới để tách từng vùng màu ra xử lý
-riêng thay vì gộp chung 1 mask nhị phân.
+Bản cập nhật:
+- Fix lỗi nhận diện sai mảng nền lớn thành viền (Tính True Solidity).
+- Fix lỗi mất viền đen trùng màu nền (Chỉ Quantize trên valid_pixels & hạ Alpha threshold).
 """
 
 import sys
@@ -51,7 +15,7 @@ import cv2
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Constants (giữ nguyên như bản SVG)
+# Constants 
 # ---------------------------------------------------------------------------
 LABEL_BACKGROUND = 0
 LABEL_FILL = 1
@@ -61,29 +25,20 @@ DEFAULT_PHYSICAL_WIDTH_MM = 80.0
 DEFAULT_THRESHOLD_MM = 2.0
 OUTER_BORDER_MAX_THICKNESS_MM = 8.0
 
-_PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan  (BGR)
-_PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta (BGR)
+_PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan 
+_PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta 
 
 
 class Shape:
-    """Container cho 1 contour ngoài (tương đương 1 SVGPath trước đây)."""
-
     def __init__(self, shape_id: int, contour: np.ndarray, holes: List[np.ndarray]):
         self.id = shape_id
-        self.contour = contour        # contour ngoài (Nx1x2)
-        self.holes = holes            # list contour lỗ bên trong
+        self.contour = contour        
+        self.holes = holes            
         self.label: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Bước 1: load ảnh -> mask nhị phân
-# ---------------------------------------------------------------------------
 def load_binary_mask(image_path: str, invert: bool = False,
                       thresh: int = 127) -> np.ndarray:
-    """Đọc ảnh grayscale rồi threshold thành mask nhị phân 0/255.
-
-    invert=True nếu nét thêu là vùng TỐI trên nền sáng.
-    """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Khong doc duoc anh: {image_path}")
@@ -94,36 +49,23 @@ def load_binary_mask(image_path: str, invert: bool = False,
     return binary
 
 
-# ---------------------------------------------------------------------------
-# Bước 2: tách contour ngoài + lỗ bằng hierarchy RETR_CCOMP
-# ---------------------------------------------------------------------------
 def extract_shapes(binary_mask: np.ndarray) -> List[Shape]:
-    """
-    Dùng cv2.RETR_CCOMP: trả về hierarchy đúng 2 cấp (ngoài / lỗ), khớp
-    thẳng với khái niệm is_hollow của bản SVG mà không cần tính nesting
-    depth thủ công.
-
-    hierarchy[i] = [Next, Previous, First_Child, Parent]
-    - Parent == -1  -> đây là contour NGOÀI (exterior)
-    - Parent != -1  -> đây là LỖ của contour ngoài tại index Parent
-    """
     contours, hierarchy = cv2.findContours(
         binary_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE
     )
     if hierarchy is None:
         return []
-    hierarchy = hierarchy[0]  # bỏ chiều batch thừa của OpenCV
+    hierarchy = hierarchy[0]  
 
     shapes: List[Shape] = []
     for i, h in enumerate(hierarchy):
         parent = h[3]
         if parent != -1:
-            continue  # đây là lỗ, sẽ được gán vào shape ngoài tương ứng
+            continue  
 
         holes = [
             contours[j] for j, hj in enumerate(hierarchy) if hj[3] == i
         ]
-        # Bỏ qua contour quá nhỏ (nhiễu)
         if cv2.contourArea(contours[i]) < 4:
             continue
         shapes.append(Shape(shape_id=len(shapes), contour=contours[i], holes=holes))
@@ -131,9 +73,6 @@ def extract_shapes(binary_mask: np.ndarray) -> List[Shape]:
     return shapes
 
 
-# ---------------------------------------------------------------------------
-# Bước 3: dựng mask riêng cho từng shape (ngoài trừ lỗ) để đo đạc
-# ---------------------------------------------------------------------------
 def shape_to_mask(shape: Shape, canvas_shape: Tuple[int, int]) -> np.ndarray:
     mask = np.zeros(canvas_shape, dtype=np.uint8)
     cv2.drawContours(mask, [shape.contour], -1, 1, thickness=cv2.FILLED)
@@ -143,8 +82,6 @@ def shape_to_mask(shape: Shape, canvas_shape: Tuple[int, int]) -> np.ndarray:
 
 
 def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float) -> float:
-    """distanceTransform + skeleton (median trên xương) -> độ dày mm.
-    Giống hệt cách đo trong bản SVG, chỉ khác input là mask OpenCV thuần."""
     if mask.sum() == 0:
         return 0.0
 
@@ -157,21 +94,24 @@ def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float) -> float:
             median_dist = np.median(skeleton_distances)
             return (median_dist * 2.0) * pixel_to_mm
     except ImportError:
-        pass  # scikit-image không có -> fallback dùng max distance
+        pass  
 
     return (np.max(dist) * 2.0) * pixel_to_mm
 
 
 # ---------------------------------------------------------------------------
-# Bước 4: áp dụng quy tắc cố định (y hệt bản SVG)
+# BỘ LUẬT ĐÃ SỬA: Dùng True Solidity để phân biệt Viền và Nền
 # ---------------------------------------------------------------------------
 def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
                      canvas_area: float, pixel_to_mm: float,
                      threshold_mm: float) -> Tuple[str, Dict]:
-    area_px = cv2.contourArea(shape.contour)
+    
     hull = cv2.convexHull(shape.contour)
     hull_area_px = cv2.contourArea(hull)
-    solidity = area_px / hull_area_px if hull_area_px > 0 else 1.0
+    
+    # BẢN VÁ 1: Tính Solidity THỰC TẾ (trừ đi diện tích các lỗ thủng)
+    true_area_px = np.count_nonzero(mask)
+    solidity = true_area_px / hull_area_px if hull_area_px > 0 else 1.0
 
     rect = cv2.minAreaRect(shape.contour)
     (rw, rh) = rect[1]
@@ -185,17 +125,21 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
         is_outer_candidate
         and canvas_area > 0
         and (hull_area_px / canvas_area) > 0.4
+        and solidity < 0.5  # ÉP BUỘC: Đã là viền ngoài thì ruột phải rỗng (solidity < 0.5)
     )
 
     if is_outermost and is_hollow and thickness_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
         label = "satin"
     elif is_hollow:
-        label = "fill" if thickness_mm >= threshold_mm else "satin"
+        if solidity < 0.6:
+            label = "fill"
+        else:
+            label = "fill" if thickness_mm >= threshold_mm else "satin"
     elif solidity < 0.65 and thickness_mm < (threshold_mm * 1.5):
         label = "satin"
     elif aspect_ratio > 4.0 and thickness_mm <= 4.0:
         label = "satin"
-    elif solidity > 0.85 and thickness_mm >= threshold_mm:
+    elif solidity > 0.85:
         label = "fill"
     else:
         label = "satin" if thickness_mm < threshold_mm else "fill"
@@ -214,10 +158,6 @@ def classify_binary_mask(binary_mask: np.ndarray,
                           physical_width_mm: float = DEFAULT_PHYSICAL_WIDTH_MM,
                           threshold_mm: float = DEFAULT_THRESHOLD_MM,
                           verbose: bool = False) -> Tuple[List[Shape], np.ndarray]:
-    """
-    Phân loại toàn bộ shape trong 1 mask nhị phân.
-    Trả về (list Shape đã gán .label, mask nhãn 3 lớp 0/1/2 cùng kích thước ảnh).
-    """
     h, w = binary_mask.shape[:2]
     canvas_area = float(w * h)
     pixel_to_mm = physical_width_mm / max(float(w), 1.0)
@@ -226,7 +166,6 @@ def classify_binary_mask(binary_mask: np.ndarray,
     if not shapes:
         return [], np.zeros((h, w), dtype=np.uint8)
 
-    # Tìm outer_border_id = shape có hull area lớn nhất (giống bản SVG)
     max_hull_area = 0.0
     outer_border_id = -1
     for shape in shapes:
@@ -259,42 +198,105 @@ def classify_binary_mask(binary_mask: np.ndarray,
     return shapes, label_mask
 
 
+def fill_unlabeled_gaps(label_mask: np.ndarray, foreground_mask: np.ndarray) -> np.ndarray:
+    unlabeled = foreground_mask & (label_mask == 0)
+    if not unlabeled.any():
+        return label_mask
+
+    labeled = foreground_mask & (label_mask != 0)
+    if not labeled.any():
+        return label_mask  
+
+    from scipy.ndimage import distance_transform_edt
+
+    _, indices = distance_transform_edt(~labeled, return_indices=True)
+
+    filled = label_mask.copy()
+    ys, xs = np.where(unlabeled)
+    nearest_ys = indices[0][ys, xs]
+    nearest_xs = indices[1][ys, xs]
+    filled[ys, xs] = label_mask[nearest_ys, nearest_xs]
+
+    return filled
+
+
 # ---------------------------------------------------------------------------
-# Tiện ích: ảnh nhiều màu (mỗi path 1 màu riêng) -> tách từng màu rồi phân loại
+# BẢN VÁ 2: Chỉ Quantize trên các pixel Hợp Lệ (Valid pixels)
 # ---------------------------------------------------------------------------
+def quantize_colors_on_valid_pixels(img_bgr: np.ndarray, valid_mask: np.ndarray, n_colors: int = 8) -> np.ndarray:
+    """
+    Chỉ chạy K-Means trên vùng logo. Không lãng phí cụm màu cho vùng trong suốt.
+    Bảo vệ tối đa các viền đen mỏng không bị xóa sổ.
+    """
+    samples = img_bgr[valid_mask].astype(np.float32)
+    if len(samples) == 0:
+        return img_bgr.copy()
+        
+    n_clusters = min(n_colors, len(np.unique(samples, axis=0)))
+    if n_clusters <= 1:
+        return img_bgr.copy()
+        
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    _, labels, centers = cv2.kmeans(
+        samples, n_clusters, None, criteria, attempts=3,
+        flags=cv2.KMEANS_PP_CENTERS,
+    )
+    centers = centers.astype(np.uint8)
+    
+    quantized_img = img_bgr.copy()
+    quantized_img[valid_mask] = centers[labels.flatten()]
+    return quantized_img
+
+
 def classify_multicolor_image(image_path: str,
                                physical_width_mm: float = DEFAULT_PHYSICAL_WIDTH_MM,
                                threshold_mm: float = DEFAULT_THRESHOLD_MM,
-                               background_color: Tuple[int, int, int] = (255, 255, 255),
                                color_tolerance: int = 10,
-                               verbose: bool = False) -> np.ndarray:
-    """
-    Dùng khi ảnh gốc là RGB, mỗi path/mảng thêu có 1 màu riêng biệt (không
-    phải nhị phân). Với mỗi màu unique khác background, tách mask riêng
-    rồi chạy classify_binary_mask, gộp kết quả vào 1 label_mask chung.
-    """
-    img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if img_bgr is None:
+                               n_colors: int = 8,
+                               quantize: bool = True,
+                               alpha_threshold: int = 10,  # HẠ NGƯỠNG ĐỂ CỨU VIỀN ĐEN MỜ (ANTI-ALIAS)
+                               min_region_pixels: int = 15,
+                               verbose: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
         raise FileNotFoundError(f"Khong doc duoc anh: {image_path}")
+
+    if img.ndim != 3 or img.shape[2] != 4:
+        raise ValueError(
+            "Anh khong co kenh alpha (khong phai RGBA). "
+            "Neu logo khong co nen trong suot, dung classify_image_file "
+            "hoac tu truyen background_color."
+        )
+
+    img_bgr = img[:, :, :3]
+    alpha = img[:, :, 3]
+    is_background = alpha < alpha_threshold
 
     h, w = img_bgr.shape[:2]
     label_mask = np.zeros((h, w), dtype=np.uint8)
 
-    pixels = img_bgr.reshape(-1, 3)
+    # Dùng hàm Quantize mới, KHÔNG truyền vùng is_background vào tính toán
+    working_img = quantize_colors_on_valid_pixels(img_bgr, ~is_background, n_colors=n_colors) if quantize else img_bgr.copy()
+    working_img[is_background] = (0, 0, 0) 
+
+    pixels = working_img[~is_background].reshape(-1, 3)
+    if pixels.size == 0:
+        return label_mask, working_img
     unique_colors = np.unique(pixels, axis=0)
 
-    bg = np.array(background_color[::-1])  # BGR
-
     for color in unique_colors:
-        if np.all(np.abs(color.astype(int) - bg.astype(int)) <= color_tolerance):
-            continue  # bỏ qua nền
+        color_int = color.astype(np.int16)
+        lower = np.clip(color_int - color_tolerance, 0, 255).astype(np.uint8)
+        upper = np.clip(color_int + color_tolerance, 0, 255).astype(np.uint8)
+        color_mask = cv2.inRange(working_img, lower, upper)
+        color_mask[is_background] = 0  
 
-        color_mask = cv2.inRange(img_bgr, color - color_tolerance, color + color_tolerance)
-        if color_mask.sum() == 0:
-            continue
+        n_pixels = int((color_mask > 0).sum())
+        if n_pixels < min_region_pixels:
+            continue  
 
         if verbose:
-            print(f"Xu ly mau BGR={tuple(color)} ...")
+            print(f"Xu ly mau BGR={tuple(int(c) for c in color)}  ({n_pixels}px) ...")
 
         _, sub_label_mask = classify_binary_mask(
             color_mask, physical_width_mm=physical_width_mm,
@@ -302,12 +304,12 @@ def classify_multicolor_image(image_path: str,
         )
         label_mask[sub_label_mask > 0] = sub_label_mask[sub_label_mask > 0]
 
-    return label_mask
+    foreground_mask = ~is_background
+    label_mask = fill_unlabeled_gaps(label_mask, foreground_mask)
+
+    return label_mask, working_img
 
 
-# ---------------------------------------------------------------------------
-# Preview / debug
-# ---------------------------------------------------------------------------
 def save_preview(label_mask: np.ndarray, output_path: str) -> None:
     h, w = label_mask.shape[:2]
     preview = np.zeros((h, w, 3), dtype=np.uint8)
@@ -321,7 +323,6 @@ def classify_image_file(image_path: str, output_mask_path: Optional[str] = None,
                          invert: bool = False, thresh: int = 127,
                          physical_width_mm: float = DEFAULT_PHYSICAL_WIDTH_MM,
                          threshold_mm: float = DEFAULT_THRESHOLD_MM) -> np.ndarray:
-    """Entry point chính cho ảnh nhị phân/grayscale đơn giản (1 màu nét thêu)."""
     binary_mask = load_binary_mask(image_path, invert=invert, thresh=thresh)
     print(f"File: {image_path}  ({binary_mask.shape[1]}x{binary_mask.shape[0]}px), "
           f"gia dinh rong {physical_width_mm}mm thuc te")
@@ -340,24 +341,37 @@ def classify_image_file(image_path: str, output_mask_path: Optional[str] = None,
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python opencv_stitch_classifier.py <image_path> [output_preview_path] "
+        print("Usage:")
+        print("  Logo mau, nen trong suot (PNG RGBA):")
+        print("    python opencv_stitch_classifier.py <image.png> [output_preview] "
+              "[physical_width_mm] [threshold_mm] --logo")
+        print("  Mask nhi phan / grayscale don sac:")
+        print("    python opencv_stitch_classifier.py <image_path> [output_preview] "
               "[physical_width_mm] [threshold_mm] [--invert]")
-        print(f"  (mac dinh physical_width_mm={DEFAULT_PHYSICAL_WIDTH_MM}, "
-              f"threshold_mm={DEFAULT_THRESHOLD_MM})")
         sys.exit(1)
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     invert_flag = "--invert" in sys.argv
+    logo_flag = "--logo" in sys.argv
 
     image_path_arg = args[0]
     output_path_arg = args[1] if len(args) > 1 else None
     physical_width_mm_arg = float(args[2]) if len(args) > 2 else DEFAULT_PHYSICAL_WIDTH_MM
     threshold_mm_arg = float(args[3]) if len(args) > 3 else DEFAULT_THRESHOLD_MM
 
-    mask = classify_image_file(
-        image_path_arg, output_path_arg, invert=invert_flag,
-        physical_width_mm=physical_width_mm_arg, threshold_mm=threshold_mm_arg,
-    )
+    if logo_flag:
+        mask, preview_colors = classify_multicolor_image(
+            image_path_arg, physical_width_mm=physical_width_mm_arg,
+            threshold_mm=threshold_mm_arg, verbose=True,
+        )
+        if output_path_arg:
+            save_preview(mask, output_path_arg)
+            cv2.imwrite(output_path_arg.replace(".png", "_quantized.png"), preview_colors)
+    else:
+        mask = classify_image_file(
+            image_path_arg, output_path_arg, invert=invert_flag,
+            physical_width_mm=physical_width_mm_arg, threshold_mm=threshold_mm_arg,
+        )
 
     print(f"\nMask shape: {mask.shape}")
     print(f"Background pixels: {(mask == LABEL_BACKGROUND).sum()}")
