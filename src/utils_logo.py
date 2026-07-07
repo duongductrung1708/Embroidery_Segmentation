@@ -174,34 +174,69 @@ def get_boundary_mask(masks, device, num_classes=3):
     
     return torch.from_numpy(boundaries).to(device)
 
-def compute_spatial_weight_map(masks, base_weight=1.0, edge_weight=5.0, kernel_size=5):
+def compute_spatial_weight_map(masks, base_weight=1.0, edge_weight=5.0,
+                                gap_weight=10.0, gap_radius=5,
+                                thin_weight=8.0, thin_radius=3):
     """
-    Tính toán bản đồ trọng số không gian. 
-    Các pixel nằm ở vùng biên giữa các màu (ví dụ: viền chữ, nét Satin) sẽ bị phạt nặng hơn.
-    
-    Args:
-        masks: [Batch, H, W] - Ground truth (class indices)
-        base_weight: Trọng số gốc cho các điểm ảnh bình thường.
-        edge_weight: Trọng số phạt cho các điểm ảnh nằm trên ranh giới.
-        kernel_size: Độ dày của vùng ranh giới muốn phạt. 
-    Returns:
-        weight_map: [Batch, H, W] - Bản đồ trọng số
+    Bản đồ trọng số không gian, phạt nặng hơn ở 3 loại vùng khó, ưu tiên
+    theo thứ tự MẠNH NHẤT trước (lấy max nếu 1 pixel rơi vào nhiều loại):
+
+    1. gap_weight -- NỀN (background) nằm trong bán kính gap_radius tính từ
+       Satin gần nhất. Xử lý đúng trường hợp "2 nét satin sát nhau": nền ở
+       khe hẹp luôn nằm trong bán kính này từ CẢ HAI phía nét satin, nên bị
+       phạt nặng nhất trong 3 loại -- ép mô hình phải giữ đúng dải nền mỏng
+       đó thay vì "lấp" nó thành satin.
+
+    2. thin_weight -- SATIN thuộc phần "lõi mỏng": pixel satin biến mất khi
+       ăn mòn (erode) bán kính thin_radius, tức bề dày thực tế của nét tại
+       đó nhỏ hơn 2*thin_radius. Xử lý trường hợp "nét satin quá mảnh" và
+       "lỗ nhỏ bên trong chữ bold" (viền quanh lỗ cũng là 1 dạng nét mỏng).
+
+    3. edge_weight -- biên giữa 2 class bất kỳ nói chung (như bản gốc,
+       giữ lại để không mất tác dụng chống tràn viền ở các vùng biên bình
+       thường, không thuộc 2 loại đặc biệt trên).
+
+    QUAN TRỌNG: đây là loss weighting, không phải chỉnh kiến trúc mạng --
+    giúp mô hình "cố gắng hơn" ở đúng vùng khó, nhưng KHÔNG đảm bảo giải
+    quyết triệt để nếu bản thân downsampling của kiến trúc đã xoá mất
+    thông tin không gian trước khi loss kịp tác động (net quá mảnh so với
+    độ phân giải sau pooling). Nếu tăng gap_weight/thin_weight mà vẫn
+    không cải thiện, nhiều khả năng cần tăng độ phân giải ảnh đầu vào
+    hoặc giảm số tầng downsampling, không phải chỉnh tiếp trọng số.
     """
     device = masks.device
     masks_np = masks.cpu().numpy().astype(np.uint8)
     batch_size, h, w = masks_np.shape
-    
+
     weight_map = np.full((batch_size, h, w), base_weight, dtype=np.float32)
-    
-    # Kernel để làm dày vùng phạt ranh giới
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    
+
+    edge_kernel = np.ones((5, 5), np.uint8)
+    thin_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * thin_radius + 1, 2 * thin_radius + 1)
+    )
+
     for i in range(batch_size):
-        # Trích xuất ranh giới bằng thuật toán Gradient (Morphological Gradient)
-        grad = cv2.morphologyEx(masks_np[i], cv2.MORPH_GRADIENT, kernel)
-        
-        # Những pixel nào có gradient > 0 (có sự thay đổi màu sắc) sẽ bị áp trọng số phạt
-        edges = (grad > 0)
-        weight_map[i][edges] = edge_weight
-        
+        m = masks_np[i]
+
+        # --- 1. Biên chung (giữ như bản gốc) ---
+        grad = cv2.morphologyEx(m, cv2.MORPH_GRADIENT, edge_kernel)
+        edge_pixels = grad > 0
+        weight_map[i][edge_pixels] = np.maximum(weight_map[i][edge_pixels], edge_weight)
+
+        satin_mask = (m == 2).astype(np.uint8)
+        if satin_mask.any():
+            # --- 2. Nền kẹp giữa 2 vùng satin (khe hẹp) ---
+            # distanceTransform(1 - satin_mask): với mỗi pixel KHÔNG phải
+            # satin, cho khoảng cách tới satin gần nhất. Nền ở khe hẹp luôn
+            # có khoảng cách nhỏ tới satin ở cả 2 phía -> chắc chắn lọt vào
+            # gap_radius, dù satin 2 bên có thuộc 2 blob tách biệt hay không.
+            dist_to_satin = cv2.distanceTransform(1 - satin_mask, cv2.DIST_L2, 5)
+            gap_pixels = (m == 0) & (dist_to_satin <= gap_radius)
+            weight_map[i][gap_pixels] = np.maximum(weight_map[i][gap_pixels], gap_weight)
+
+            # --- 3. Satin thuộc phần lõi mỏng (nét mảnh / viền lỗ nhỏ) ---
+            eroded_satin = cv2.erode(satin_mask, thin_kernel, iterations=1)
+            thin_pixels = (satin_mask == 1) & (eroded_satin == 0)
+            weight_map[i][thin_pixels] = np.maximum(weight_map[i][thin_pixels], thin_weight)
+
     return torch.from_numpy(weight_map).to(device)
