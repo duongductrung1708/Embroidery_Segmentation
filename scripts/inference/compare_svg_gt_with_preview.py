@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-So sanh SVG co nhan GT voi anh PREVIEW da chay san (KHONG chay lai classify)
+So sanh SVG co nhan GT voi anh PREDICTED
 ==============================================================================
 
 CHI CAN SUA 2 DUONG DAN BEN DUOI (SVG_DIR va PREVIEW_DIR) roi chay:
     python compare_svg_gt_with_preview.py
 
-Quy uoc ghep cap: file "logo1.svg" trong SVG_DIR se duoc ghep voi file
-"logo1.png" (hoac ten trung, duoi bat ky trong IMAGE_EXTS) trong PREVIEW_DIR.
-
-Anh preview phai la anh xuat ra tu save_preview() cua opencv_stitch_classifier.py
-(chi co 3 mau: den=nen, vang that=fill, magenta=satin).
+BẢN CẬP NHẬT:
+1. Tích hợp SMART LOAD (chấp cả ảnh mask 0,1,2 lẫn ảnh Preview màu Vàng/Hồng).
+2. Tich hop Boundary Tolerance de loai bo nhieu rang cua ra khoi chi so Metrics.
 """
 
 import glob
@@ -25,7 +23,7 @@ import numpy as np
 from PIL import Image
 
 # =============================================================================
-# SUA 2 DUONG DAN NAY CHO DUNG MAY BAN
+# CẤU HÌNH ĐƯỜNG DẪN
 # =============================================================================
 SVG_DIR = "data/opencv_test/svg"
 PREVIEW_DIR = "data/opencv_test/predictions"
@@ -35,10 +33,11 @@ LABEL_BACKGROUND, LABEL_FILL, LABEL_SATIN = 0, 1, 2
 CLASS_NAMES = {LABEL_BACKGROUND: "background", LABEL_FILL: "fill", LABEL_SATIN: "satin"}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
-# Mau preview theo dung quy uoc cua save_preview() trong opencv_stitch_classifier.py
-# (doc bang cv2.imread -> mang BGR)
-_PREVIEW_FILL_BGR = (0, 255, 255)     # hien thi la mau VANG
-_PREVIEW_SATIN_BGR = (255, 0, 255)    # hien thi la mau MAGENTA
+INKSCAPE_NS = "http://www.inkscape.org/namespaces/inkscape"
+ET.register_namespace("inkscape", INKSCAPE_NS)
+
+# Dung sai bo qua vien (pixel)
+DEFAULT_BOUNDARY_TOLERANCE_PX = 5
 
 
 def _tag(elem: ET.Element) -> str:
@@ -46,7 +45,7 @@ def _tag(elem: ET.Element) -> str:
 
 
 def guess_label(path_elem: ET.Element) -> Optional[str]:
-    """Doan nhan GT cua 1 path. SUA HAM NAY neu file SVG cua ban dung quy uoc khac."""
+    """Doan nhan GT cua 1 path."""
     for key, val in path_elem.attrib.items():
         if key.endswith("}label") or key == "inkscape:label":
             v = val.strip().lower()
@@ -89,7 +88,7 @@ def render_gt_label_mask(svg_path: str, width: int, height: int) -> np.ndarray:
         label = guess_label(p)
         if label is None:
             unresolved.append(p)
-        color = "#FF0000" if label == "satin" else "#0000FF"  # danh dau noi bo, khong lien quan mau hien thi
+        color = "#FF0000" if label == "fill" else "#00FF00"  # Đỏ -> Fill, Lục -> Satin
         p.set("fill", color)
         p.set("fill-opacity", "1")
         p.set("stroke", "none")
@@ -98,47 +97,75 @@ def render_gt_label_mask(svg_path: str, width: int, height: int) -> np.ndarray:
     if unresolved:
         sample = unresolved[0]
         print(f"[LOI] Khong doan duoc nhan GT cho {len(unresolved)}/{len(paths)} path trong {svg_path}")
-        print("       Attribute thuc te cua path dau tien chua doan duoc:")
-        for k, v in sample.attrib.items():
-            print(f"         {k} = {v!r}")
-        print("       -> Sua ham guess_label() o dau file nay cho dung quy uoc GT that.")
         return None
 
     png_bytes = cairosvg.svg2png(bytestring=ET.tostring(root), output_width=width,
                                   output_height=height, background_color=None, unsafe=True)
-    img = np.array(Image.open(BytesIO(png_bytes)).convert("RGBA"))
-
-    alpha = img[:, :, 3]
-    is_visible = alpha >= 128
-    r, g, b = img[:, :, 0].astype(int), img[:, :, 1].astype(int), img[:, :, 2].astype(int)
-    is_satin = is_visible & (r > 150) & (g < 80) & (b < 80)
-    is_fill = is_visible & (b > 150) & (r < 80) & (g < 80)
+    img = np.array(Image.open(BytesIO(png_bytes)).convert("RGB"))
 
     label_mask = np.zeros((height, width), dtype=np.uint8)
-    label_mask[is_fill] = LABEL_FILL
-    label_mask[is_satin] = LABEL_SATIN
+    label_mask[img[:, :, 0] > 128] = LABEL_FILL   # Đỏ
+    label_mask[img[:, :, 1] > 128] = LABEL_SATIN  # Xanh lục
     return label_mask
 
 
-def load_preview_label_mask(path: str) -> np.ndarray:
-    """Doc anh preview (da chay san tu opencv_stitch_classifier.py) -> label-mask 0/1/2."""
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
-    if img is None:
-        raise FileNotFoundError(path)
-    label_mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    label_mask[np.all(img == _PREVIEW_FILL_BGR, axis=2)] = LABEL_FILL
-    label_mask[np.all(img == _PREVIEW_SATIN_BGR, axis=2)] = LABEL_SATIN
-    return label_mask
+def load_preview_label_mask(pred_path: str) -> np.ndarray:
+    """SMART LOAD: Tự động nhận diện ảnh xám (0,1,2) hoặc ảnh màu (Cyan/Magenta)"""
+    pred_bgr = cv2.imread(pred_path, cv2.IMREAD_COLOR)
+    if pred_bgr is None:
+        raise FileNotFoundError(pred_path)
+
+    h, w = pred_bgr.shape[:2]
+    pred_mask = np.zeros((h, w), dtype=np.uint8)
+
+    # KỊCH BẢN 1: Ảnh mask đen thui (toàn số 0, 1, 2)
+    if pred_bgr.max() <= 2:
+        return pred_bgr[:, :, 0]
+
+    # KỊCH BẢN 2: Ảnh màu Preview 
+    # Màu Vàng (Cyan BGR) -> Gán Fill (1)
+    fill_pixels = (pred_bgr[:, :, 0] < 50) & (pred_bgr[:, :, 1] > 200) & (pred_bgr[:, :, 2] > 200)
+    # Màu Hồng (Magenta BGR) -> Gán Satin (2)
+    satin_pixels = (pred_bgr[:, :, 0] > 200) & (pred_bgr[:, :, 1] < 50) & (pred_bgr[:, :, 2] > 200)
+
+    pred_mask[fill_pixels] = 1
+    pred_mask[satin_pixels] = 2
+
+    return pred_mask
+
+
+def build_boundary_ignore_mask(gt_mask: np.ndarray, tolerance_px: int) -> np.ndarray:
+    """Tao vung dem quanh cac duong bien de bo qua nhieu rang cua."""
+    if tolerance_px <= 0:
+        return np.zeros_like(gt_mask, dtype=bool)
+
+    edges = np.zeros_like(gt_mask, dtype=bool)
+    edges |= (gt_mask != np.roll(gt_mask, 1, axis=0))
+    edges |= (gt_mask != np.roll(gt_mask, -1, axis=0))
+    edges |= (gt_mask != np.roll(gt_mask, 1, axis=1))
+    edges |= (gt_mask != np.roll(gt_mask, -1, axis=1))
+
+    edges_u8 = edges.astype(np.uint8)
+    kernel = np.ones((tolerance_px * 2 + 1, tolerance_px * 2 + 1), np.uint8)
+    dilated = cv2.dilate(edges_u8, kernel, iterations=1)
+
+    return dilated.astype(bool)
 
 
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
-def confusion_matrix_3class(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+def confusion_matrix_3class(pred: np.ndarray, gt: np.ndarray, ignore_mask: np.ndarray = None) -> np.ndarray:
+    """Tinh ma tran nham lan, bo qua pixel thuoc ignore_mask."""
     cm = np.zeros((3, 3), dtype=np.int64)
+    valid_mask = ~ignore_mask if ignore_mask is not None else np.ones_like(gt, dtype=bool)
+
+    valid_gt = gt[valid_mask]
+    valid_pred = pred[valid_mask]
+
     for gt_c in range(3):
         for pred_c in range(3):
-            cm[gt_c, pred_c] = int(np.sum((gt == gt_c) & (pred == pred_c)))
+            cm[gt_c, pred_c] = int(np.sum((valid_gt == gt_c) & (valid_pred == pred_c)))
     return cm
 
 
@@ -182,10 +209,12 @@ def shape_level_stats(pred: np.ndarray, gt: np.ndarray, min_area_px: int = 4) ->
 
 
 def find_matching_image(image_dir: str, base_name: str) -> Optional[str]:
-    for ext in IMAGE_EXTS:
-        candidate = os.path.join(image_dir, base_name + ext)
-        if os.path.exists(candidate):
-            return candidate
+    # Ho tro ca ten goc "14" hoac "14_pred"
+    for suffix in ["", "_pred"]:
+        for ext in IMAGE_EXTS:
+            candidate = os.path.join(image_dir, base_name + suffix + ext)
+            if os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -204,7 +233,7 @@ def main():
         base = os.path.splitext(os.path.basename(svg_path))[0]
         preview_path = find_matching_image(PREVIEW_DIR, base)
         if preview_path is None:
-            print(f"[bo qua] khong tim thay preview khop voi '{base}' trong {PREVIEW_DIR}")
+            print(f"[bo qua] khong tim thay mask khop voi '{base}' trong {PREVIEW_DIR}")
             n_skipped += 1
             continue
 
@@ -216,7 +245,9 @@ def main():
             n_skipped += 1
             continue
 
-        cm = confusion_matrix_3class(pred_mask, gt_mask)
+        ignore_mask = build_boundary_ignore_mask(gt_mask, DEFAULT_BOUNDARY_TOLERANCE_PX)
+
+        cm = confusion_matrix_3class(pred_mask, gt_mask, ignore_mask)
         per_class = metrics_from_confusion(cm)
         mean_iou = np.nanmean([per_class[LABEL_FILL]["iou"], per_class[LABEL_SATIN]["iou"]])
         mean_f1 = np.nanmean([per_class[LABEL_FILL]["f1"], per_class[LABEL_SATIN]["f1"]])
@@ -238,6 +269,7 @@ def main():
 
     print("\n" + "=" * 60)
     print(f"DA DANH GIA: {n_evaluated} anh  (bo qua: {n_skipped})")
+    print(f"(Da loai bo nhieu viem voi tolerance = {DEFAULT_BOUNDARY_TOLERANCE_PX}px)")
     if n_evaluated == 0:
         return
 
