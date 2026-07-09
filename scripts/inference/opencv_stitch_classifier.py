@@ -3,20 +3,19 @@
 OpenCV Stitch Classifier - Satin vs Fill (rule-based, KHÔNG train model)
 =========================================================================
 
-BẢN CẬP NHẬT: THÊM CONTEXT-AWARE CLASSIFICATION
+BẢN CẬP NHẬT: THÊM CONTEXT-AWARE CLASSIFICATION + BATCH MODE
 - Chuẩn hóa Canvas về kích thước 4200x4800 chống méo hình.
 - Đo đạc siêu tốc trên ảnh khổng lồ nhờ kỹ thuật Downscaling ma trận tạm thời.
-- LỌC RÁC THÔNG MINH: Bảo vệ tuyệt đối chữ I, nét mảnh và dấu chấm nhỏ dựa trên
-  Aspect Ratio và Solidity, tiêu diệt triệt để các cụm nhiễu răng cưa.
-- KHÔNG PHỤ THUỘC MÀU SẮC: Xóa bỏ cờ is_bg_color gây nhiễu, phân loại 100% dựa
-  vào giới hạn vật lý của máy thêu.
-- MỚI: CONTEXT-AWARE CLASSIFICATION (post-processing theo quan hệ giữa các shape)
-  Sau khi phân loại độc lập từng shape, hệ thống xây dựng quan hệ "tiếp xúc / bao quanh"
-  (adjacency) giữa các shape (kể cả khác màu). Nếu một shape SATIN đóng vai trò
-  đường viền (outline) bao quanh một shape khác, shape bên trong sẽ bị ép về FILL,
-  tránh chồng hai lớp satin lên nhau (đúng theo cách digitizing software xây dựng object).
+- LỌC RÁC THÔNG MINH dựa trên Aspect Ratio và Solidity.
+- CONTEXT-AWARE CLASSIFICATION: outline satin bao quanh + dính biên thực sự
+  mới ép shape bên trong về fill (tránh chồng 2 lớp satin).
+- MỚI: --batch quét cả thư mục 1 lệnh, tự lưu preview + quantized vào 2
+  thư mục riêng biệt (quantized luôn tách riêng theo yêu cầu).
 """
 
+import argparse
+import glob
+import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -34,35 +33,25 @@ DEFAULT_PHYSICAL_WIDTH_MM = 80.0
 DEFAULT_THRESHOLD_MM = 2.0
 OUTER_BORDER_MAX_THICKNESS_MM = 8.0
 
-# Ngưỡng vật lý tối thiểu. Dưới mức này (vd: viền nhiễu) -> Có nguy cơ là Rác
 MIN_PHYSICAL_STITCH_MM = 0.4
-
-# Ngưỡng overlap để coi 1 shape là "nằm bên trong" vùng do outline bao quanh
-# (dùng để xác định B có thuộc "lòng trong" của A hay không, KHÔNG dùng để quyết định đổi nhãn)
 CONTEXT_CONTAINMENT_RATIO = 0.5
-
-# Số pixel dilate để kiểm tra 2 shape có THỰC SỰ chạm/dính biên nhau hay không.
-# Nếu giữa 2 satin có 1 lớp fill ngăn cách dày hơn mức này thì sẽ KHÔNG bị coi là dính nhau.
 CONTEXT_TOUCH_DILATION_PX = 3
 
-_PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan  (Màu Vàng trên ảnh Preview)
-_PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta (Màu Hồng trên ảnh Preview)
+_PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan  (hien thi mau VANG that)
+_PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 class Shape:
-    """Container lưu trữ dữ liệu của 1 contour ngoài cùng và các lỗ bên trong nó."""
     def __init__(self, shape_id: int, contour: np.ndarray, holes: List[np.ndarray]):
         self.id = shape_id
         self.contour = contour
         self.holes = holes
         self.label: Optional[str] = None
-        # global_id: id duy nhất trên toàn ảnh (khác các shape.id nội bộ theo từng màu)
         self.global_id: Optional[int] = None
 
 
-# ---------------------------------------------------------------------------
-# Bước 0: Chuẩn hóa Canvas (Letterbox)
-# ---------------------------------------------------------------------------
 def normalize_to_canvas(img: np.ndarray, target_w: int = 4200, target_h: int = 4800) -> np.ndarray:
     h_orig, w_orig = img.shape[:2]
 
@@ -94,9 +83,6 @@ def normalize_to_canvas(img: np.ndarray, target_w: int = 4200, target_h: int = 4
     return canvas
 
 
-# ---------------------------------------------------------------------------
-# Bước 1 & 2 & 3: Đọc Mask, Tìm Contour, Tính độ dày
-# ---------------------------------------------------------------------------
 def load_binary_mask(image_path: str, invert: bool = False, thresh: int = 127) -> np.ndarray:
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -167,9 +153,6 @@ def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float) -> Tuple[float,
     return median_thickness_mm, max_thickness_mm
 
 
-# ---------------------------------------------------------------------------
-# Bước 4: Áp dụng Quy Tắc (phân loại độc lập từng shape)
-# ---------------------------------------------------------------------------
 def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
                      canvas_area: float, pixel_to_mm: float,
                      threshold_mm: float) -> Tuple[str, Dict]:
@@ -205,47 +188,27 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
 
     label = None
 
-    # =====================================================================
-    # LUẬT 0: LỌC RÁC KỸ THUẬT SỐ & BẢO VỆ CHI TIẾT SIÊU MẢNH
-    # =====================================================================
     if thickness_mm < MIN_PHYSICAL_STITCH_MM:
-        # Cứu sống 1: Dấu chấm, dấu phẩy, hình vuông nhỏ (Đặc ruột)
         if solidity >= 0.75:
             area_mm2 = true_area_px * (pixel_to_mm ** 2)
             if area_mm2 >= 0.2:
                 label = "satin"
             else:
                 return "noise", details
-
-        # Cứu sống 2: Chữ I, chữ l, nét gạch (Dài và hẹp)
         elif aspect_ratio > 2.5:
             label = "satin"
-
-        # Không đặc, không dài -> Chắc chắn là rác răng cưa/góc nhọn
         else:
             return "noise", details
 
-    # =====================================================================
-    # 5 QUY TẮC PHÂN LOẠI CHÍNH TỪ DIGITIZER
-    # =====================================================================
     if label is None:
-        # 1. Viền ngoài cùng -> SATIN
         if is_outermost and is_hollow and thickness_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
             label = "satin"
-
-        # 2. Hình có lỗ (Chữ O, A, D, R...) -> SATIN nếu mỏng, FILL nếu dày
         elif is_hollow:
             label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
-
-        # 3. Nét chữ gạch/ngoằn ngoèo không lỗ (S, C, M, I, l...)
         elif not is_hollow and (solidity < 0.75 or aspect_ratio > 2.5):
             label = "satin" if thickness_mm <= (threshold_mm * 2.0) else "fill"
-
-        # 4. Khối đặc ruột (Dấu chấm 'i', mảng nền đặc)
         elif solidity >= 0.75:
             label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
-
-        # 5. Fallback
         else:
             label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
 
@@ -298,23 +261,17 @@ def classify_binary_mask(binary_mask: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# MỚI: Context-aware Classification (post-processing theo quan hệ shape)
+# Context-aware Classification
 # ---------------------------------------------------------------------------
 class _GlobalShapeRecord:
-    """Gói 1 shape + mask toàn cục (kích thước bằng canvas) + label hiện tại."""
     def __init__(self, shape: Shape, mask: np.ndarray, area_px: int):
         self.shape = shape
-        self.mask = mask          # mask nhị phân (0/1), kích thước = canvas
-        self.area_px = area_px    # số pixel của shape (để tính tỉ lệ containment)
+        self.mask = mask
+        self.area_px = area_px
 
 
 def _build_interior_mask(shape: Shape, shape_mask: np.ndarray,
                           canvas_shape: Tuple[int, int]) -> Optional[np.ndarray]:
-    """
-    Trả về mask vùng "bên trong" của một shape có lỗ (hole), tức là
-    outer_contour_area - shape_mask (chính là vùng lỗ, nơi có thể chứa shape khác).
-    Nếu shape không có hole -> trả về None.
-    """
     if len(shape.holes) == 0:
         return None
     outer_mask = np.zeros(canvas_shape, dtype=np.uint8)
@@ -338,24 +295,6 @@ def refine_labels_by_context(records: List[_GlobalShapeRecord],
                               containment_ratio: float = CONTEXT_CONTAINMENT_RATIO,
                               touch_dilation_px: int = CONTEXT_TOUCH_DILATION_PX,
                               verbose: bool = False) -> np.ndarray:
-    """
-    Bước refine sau khi đã có kết quả phân loại ban đầu cho TẤT CẢ shape
-    (kể cả từ các màu khác nhau trong ảnh multicolor).
-
-    Quy tắc (ĐÃ SỬA THEO YÊU CẦU):
-    Chỉ đổi nhãn khi 2 điều kiện sau đúng ĐỒNG THỜI:
-      1) B nằm (phần lớn) trong vùng lỗ mà A (outline, satin, có hole) bao quanh
-         -> xác định A đóng vai trò đường viền của B.
-      2) A và B THỰC SỰ chạm/dính biên nhau (không có khoảng cách, không bị 1 lớp
-         fill nào khác ngăn cách ở giữa) -> kiểm tra bằng cách dilate mask A vài
-         pixel rồi giao với mask B.
-
-    Nếu 2 satin bị ngăn cách bởi 1 vùng fill ở giữa (không dính nhau trực tiếp),
-    thì KHÔNG có gì thay đổi, kể cả khi B nằm lọt bên trong A về mặt hình học.
-
-    Khi cả 2 điều kiện đúng và B đang là "satin" -> ép B về "fill".
-    Không đổi các shape đã là "fill" hoặc "noise".
-    """
     outline_candidates = [r for r in records
                            if r.shape.label == "satin" and len(r.shape.holes) > 0]
 
@@ -364,38 +303,33 @@ def refine_labels_by_context(records: List[_GlobalShapeRecord],
         if interior_mask is None:
             continue
 
-        # Vùng biên của outline được nới rộng thêm vài pixel để bắt các điểm
-        # thực sự tiếp xúc (kể cả khi có sai số răng cưa/anti-alias nhỏ).
         outline_mask_dilated = _dilate_mask(outline.mask, touch_dilation_px)
 
         for other in records:
             if other is outline:
                 continue
             if other.shape.label != "satin":
-                continue  # chỉ cần ép satin -> fill, các nhãn khác giữ nguyên
+                continue
             if other.area_px == 0:
                 continue
 
-            # Điều kiện 1: B có nằm trong vùng do A bao quanh không?
             overlap_interior = int(np.count_nonzero(interior_mask & other.mask))
             interior_ratio = overlap_interior / other.area_px
             if interior_ratio < containment_ratio:
                 continue
 
-            # Điều kiện 2: A và B có THỰC SỰ dính biên nhau không?
             touch_overlap = int(np.count_nonzero(outline_mask_dilated & other.mask))
             if touch_overlap == 0:
-                # Không dính nhau (có khoảng cách / bị fill khác ngăn cách) -> bỏ qua
                 if verbose:
-                    print(f"  [Context] Shape(global_id={other.shape.global_id}) nằm trong "
-                          f"outline Shape(global_id={outline.shape.global_id}) nhưng KHÔNG "
-                          f"dính biên -> giữ nguyên SATIN")
+                    print(f"  [Context] Shape(global_id={other.shape.global_id}) nam trong "
+                          f"outline Shape(global_id={outline.shape.global_id}) nhung KHONG "
+                          f"dinh bien -> giu nguyen SATIN")
                 continue
 
             if verbose:
-                print(f"  [Context] Shape(global_id={other.shape.global_id}) dính biên trực tiếp "
-                      f"với outline Shape(global_id={outline.shape.global_id}) "
-                      f"(interior_ratio={interior_ratio:.2f}) -> ép SATIN thành FILL")
+                print(f"  [Context] Shape(global_id={other.shape.global_id}) dinh bien voi "
+                      f"outline Shape(global_id={outline.shape.global_id}) "
+                      f"(interior_ratio={interior_ratio:.2f}) -> ep SATIN thanh FILL")
             other.shape.label = "fill"
             label_mask[other.mask == 1] = LABEL_FILL
 
@@ -403,7 +337,7 @@ def refine_labels_by_context(records: List[_GlobalShapeRecord],
 
 
 # ---------------------------------------------------------------------------
-# Hậu xử lý
+# Hau xu ly
 # ---------------------------------------------------------------------------
 def fill_unlabeled_gaps(label_mask: np.ndarray, foreground_mask: np.ndarray) -> np.ndarray:
     unlabeled = foreground_mask & (label_mask == 0)
@@ -468,7 +402,6 @@ def classify_multicolor_image(image_path: str,
 
     unique_colors = np.unique(pixels, axis=0)
 
-    # Thu thập TOÀN BỘ shape (mọi màu) để làm context refinement sau đó
     global_records: List[_GlobalShapeRecord] = []
     global_id_counter = 0
 
@@ -492,7 +425,6 @@ def classify_multicolor_image(image_path: str,
         )
         label_mask[sub_label_mask > 0] = sub_label_mask[sub_label_mask > 0]
 
-        # Ghi lại từng shape với mask toàn cục (canvas size) để refine sau
         for shape in shapes:
             if shape.label not in ("satin", "fill"):
                 continue
@@ -502,7 +434,6 @@ def classify_multicolor_image(image_path: str,
             area_px = int(np.count_nonzero(shape_mask))
             global_records.append(_GlobalShapeRecord(shape, shape_mask, area_px))
 
-    # ---- BƯỚC MỚI: Context-aware refinement ----
     if enable_context_refinement and global_records:
         if verbose:
             print(">> Dang chay Context-aware refinement (outline satin -> fill ben trong)...")
@@ -510,7 +441,6 @@ def classify_multicolor_image(image_path: str,
             global_records, label_mask, canvas_shape, verbose=verbose
         )
 
-    # Lấp "khe hở đen" và hòa tan vùng rác kỹ thuật số
     foreground_mask = ~is_background
     label_mask = fill_unlabeled_gaps(label_mask, foreground_mask)
 
@@ -518,7 +448,7 @@ def classify_multicolor_image(image_path: str,
 
 
 # ---------------------------------------------------------------------------
-# Xuất ảnh Preview & Khởi chạy CLI
+# Xuat anh
 # ---------------------------------------------------------------------------
 def save_preview(label_mask: np.ndarray, output_path: str) -> None:
     h, w = label_mask.shape[:2]
@@ -529,33 +459,87 @@ def save_preview(label_mask: np.ndarray, output_path: str) -> None:
     print(f"Preview saved to {output_path}")
 
 
+def save_quantized(working_img_bgr: np.ndarray, output_path: str) -> None:
+    cv2.imwrite(output_path, working_img_bgr)
+    print(f"Quantized saved to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# Xu ly 1 anh: luon tach rieng preview va quantized vao 2 thu muc khac nhau
+# ---------------------------------------------------------------------------
+def process_one_image(image_path: str, preview_dir: str, quantized_dir: str,
+                       physical_width_mm: float, threshold_mm: float,
+                       enable_context_refinement: bool, verbose: bool) -> None:
+    base_name = os.path.splitext(os.path.basename(image_path))[0]
+
+    mask, quantized_img = classify_multicolor_image(
+        image_path, physical_width_mm=physical_width_mm, threshold_mm=threshold_mm,
+        enable_context_refinement=enable_context_refinement, verbose=verbose,
+    )
+
+    os.makedirs(preview_dir, exist_ok=True)
+    save_preview(mask, os.path.join(preview_dir, f"{base_name}_pred.png"))
+
+    if quantized_dir:
+        os.makedirs(quantized_dir, exist_ok=True)
+        save_quantized(quantized_img, os.path.join(quantized_dir, f"{base_name}_quantized.png"))
+
+    n_bg = int((mask == LABEL_BACKGROUND).sum())
+    n_fill = int((mask == LABEL_FILL).sum())
+    n_satin = int((mask == LABEL_SATIN).sum())
+    print(f"  -> {base_name}: bg={n_bg}  fill={n_fill}  satin={n_satin}")
+
+
+def find_images_in_dir(folder: str) -> List[str]:
+    files = []
+    for ext in IMAGE_EXTS:
+        files.extend(glob.glob(os.path.join(folder, f"*{ext}")))
+        files.extend(glob.glob(os.path.join(folder, f"*{ext.upper()}")))
+    return sorted(set(files))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="OpenCV Stitch Classifier - Satin vs Fill (rule-based)")
+    parser.add_argument("input", help="1 file anh, HOAC 1 thu muc neu dung --batch")
+    parser.add_argument("--out-dir", default="opencv_test",
+                         help="Thu muc goc luu preview (mac dinh: opencv_test)")
+    parser.add_argument("--quantized-dir", default=None,
+                         help="Thu muc rieng de luu anh quantized "
+                              "(mac dinh: <out-dir>/quantized)")
+    parser.add_argument("--physical-width-mm", type=float, default=DEFAULT_PHYSICAL_WIDTH_MM)
+    parser.add_argument("--threshold-mm", type=float, default=DEFAULT_THRESHOLD_MM)
+    parser.add_argument("--batch", action="store_true",
+                         help="Neu bat: 'input' la 1 THU MUC, quet toan bo anh ben trong")
+    parser.add_argument("--no-context", action="store_true",
+                         help="Tat context-aware refinement (outline satin -> fill)")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    out_dir = args.out_dir
+    quantized_dir = args.quantized_dir or os.path.join(out_dir, "quantized")
+    enable_context = not args.no_context
+
+    if args.batch:
+        image_files = find_images_in_dir(args.input)
+        if not image_files:
+            print(f"Khong tim thay anh nao trong {args.input}")
+            sys.exit(1)
+        print(f"Tim thay {len(image_files)} anh. Bat dau xu ly hang loat...")
+        for i, img_path in enumerate(image_files, 1):
+            print(f"[{i}/{len(image_files)}] {os.path.basename(img_path)}")
+            try:
+                process_one_image(img_path, out_dir, quantized_dir,
+                                   args.physical_width_mm, args.threshold_mm,
+                                   enable_context, args.verbose)
+            except Exception as e:
+                print(f"  [LOI] Bo qua anh nay: {e}")
+        print(f"\nHoan tat. Preview -> {out_dir}/   Quantized -> {quantized_dir}/")
+    else:
+        process_one_image(args.input, out_dir, quantized_dir,
+                           args.physical_width_mm, args.threshold_mm,
+                           enable_context, args.verbose)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  Logo PNG TRONG SUỐT (Khuyên dùng):")
-        print("    python opencv_stitch_classifier.py <image.png> [output_preview] [physical_width_mm] [threshold_mm] --logo [--no-context]")
-        sys.exit(1)
-
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    logo_flag = "--logo" in sys.argv
-    no_context_flag = "--no-context" in sys.argv
-
-    image_path_arg = args[0]
-    output_path_arg = args[1] if len(args) > 1 else None
-    physical_width_mm_arg = float(args[2]) if len(args) > 2 else DEFAULT_PHYSICAL_WIDTH_MM
-    threshold_mm_arg = float(args[3]) if len(args) > 3 else DEFAULT_THRESHOLD_MM
-
-    if logo_flag:
-        mask, preview_colors = classify_multicolor_image(
-            image_path_arg, physical_width_mm=physical_width_mm_arg,
-            threshold_mm=threshold_mm_arg,
-            enable_context_refinement=not no_context_flag,
-            verbose=True,
-        )
-        if output_path_arg:
-            save_preview(mask, output_path_arg)
-
-    print(f"\nMask shape: {mask.shape}")
-    print(f"Background pixels: {(mask == LABEL_BACKGROUND).sum()}")
-    print(f"Fill pixels: {(mask == LABEL_FILL).sum()}")
-    print(f"Satin pixels: {(mask == LABEL_SATIN).sum()}")
+    main()
