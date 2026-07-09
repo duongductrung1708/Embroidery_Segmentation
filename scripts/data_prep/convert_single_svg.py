@@ -525,7 +525,7 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
 
 
 if __name__ == "__main__":
-    INPUT_PATH = "test.png"  
+    INPUT_PATH = "76.png"
     OUTPUT_PATH = None  
     USE_FAL = True 
     

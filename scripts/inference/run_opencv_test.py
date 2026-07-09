@@ -224,8 +224,37 @@ def main():
 
         cm = confusion_matrix_3class(pred_mask, gt_mask)
         per_class = metrics_from_confusion(cm)
-        mean_iou = np.nanmean([per_class[LABEL_FILL]["iou"], per_class[LABEL_SATIN]["iou"]])
-        mean_f1 = np.nanmean([per_class[LABEL_FILL]["f1"], per_class[LABEL_SATIN]["f1"]])
+
+        # CHI tinh mean IoU/F1 tren cac lop THUC SU CO MAT trong GT cua anh nay.
+        # Ly do: neu GT chi co fill (khong co satin nao ca), ma cu ep tinh
+        # mean([iou_fill, iou_satin]), thi chi can pred lo du doan nham vai
+        # pixel thanh satin (nhieu/rac) la iou_satin roi thang xuong 0.0 (thay
+        # vi "khong ap dung"), keo diem trung binh xuong mot cach bat cong du
+        # anh gan nhu hoan hao. Ngoai ra van CANH BAO rieng neu co hien tuong
+        # du doan nham sang lop khong ton tai trong GT, de khong giau loi that.
+        gt_has_fill = bool(np.any(gt_mask == LABEL_FILL))
+        gt_has_satin = bool(np.any(gt_mask == LABEL_SATIN))
+
+        applicable_iou, applicable_f1 = [], []
+        if gt_has_fill:
+            applicable_iou.append(per_class[LABEL_FILL]["iou"])
+            applicable_f1.append(per_class[LABEL_FILL]["f1"])
+        if gt_has_satin:
+            applicable_iou.append(per_class[LABEL_SATIN]["iou"])
+            applicable_f1.append(per_class[LABEL_SATIN]["f1"])
+
+        mean_iou = np.nanmean(applicable_iou) if applicable_iou else float("nan")
+        mean_f1 = np.nanmean(applicable_f1) if applicable_f1 else float("nan")
+
+        # Canh bao rieng: pred co du doan nham sang lop KHONG ton tai trong GT
+        warnings = []
+        if not gt_has_satin and np.any(pred_mask == LABEL_SATIN):
+            n_fp = int(np.sum(pred_mask == LABEL_SATIN))
+            warnings.append(f"GT khong co satin nhung pred du doan nham {n_fp}px thanh satin")
+        if not gt_has_fill and np.any(pred_mask == LABEL_FILL):
+            n_fp = int(np.sum(pred_mask == LABEL_FILL))
+            warnings.append(f"GT khong co fill nhung pred du doan nham {n_fp}px thanh fill")
+
         s_total, s_correct, s_mismatches = shape_level_stats(pred_mask, gt_mask)
 
         all_cm += cm
@@ -238,6 +267,8 @@ def main():
         shape_acc = s_correct / s_total if s_total else float("nan")
         print(f"{base:20s}  meanIoU={mean_iou:.3f}  meanF1={mean_f1:.3f}  "
               f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total})")
+        for warning in warnings:
+            print(f"    [CANH BAO] {warning}")
         for area, gt_l, pred_l in sorted(s_mismatches, reverse=True)[:5]:
             print(f"    -> shape sai: area={area:>8d}px  gt={gt_l:6s}  pred={pred_l}")
 
