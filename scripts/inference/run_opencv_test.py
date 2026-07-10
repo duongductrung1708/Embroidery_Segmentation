@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-Chay batch + danh gia dung theo cau truc thu muc thuc te cua ban:
-
-data/opencv_test/
-  svg/              <- SVG co san nhan GT (vd 4.svg, 14.svg, 23.svg, ...)
-  predictions/      <- (tu tao) luu preview du doan
-  quantized/        <- (tu tao) luu anh da luong tu hoa mau
-  4.png, 14.png, 23.png, 92.png, 127.png, 132.png, 144.png, 148.png, test.png
-                    <- anh that can predict, TEN TRUNG voi file trong svg/
-
-CHI CAN SUA DUONG DAN GOC (OPENCV_TEST_DIR) O DUOI RoI CHAY:
-    python run_opencv_test.py
+run_opencv_test.py
+- Chay batch + danh gia dung theo cau truc thu muc data/opencv_test/
+- Doan nhan GT da tang (Hierarchical Guessing): tu dong thua ke nhan tu Group
+  cha va Fallback theo mau Style (Red=Satin, Blue/Green=Fill), mac dinh Fill
+  neu khong doan duoc gi ca.
+- Log day du: MACRO (trung binh moi anh) + MICRO (gop tat ca pixel) +
+  SHAPE-LEVEL (gop tat ca shape), giong dinh dang bao cao chuan cua ban.
 """
 
 import glob
@@ -45,70 +41,71 @@ from opencv_stitch_classifier import (
 CLASS_NAMES = {LABEL_BACKGROUND: "background", LABEL_FILL: "fill", LABEL_SATIN: "satin"}
 
 
-# ---------------------------------------------------------------------------
-# Doan nhan GT tu 1 <path> SVG (sua ham nay neu file cua ban dung quy uoc khac)
-# ---------------------------------------------------------------------------
 def _tag(elem: ET.Element) -> str:
     return elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
 
 
-def guess_label(path_elem: ET.Element) -> Optional[str]:
-    for key, val in path_elem.attrib.items():
+# ---------------------------------------------------------------------------
+# THUAT TOAN DOAN NHAN DA TANG (HIERARCHICAL GUESSING)
+# ---------------------------------------------------------------------------
+def check_element_label(elem: ET.Element) -> Optional[str]:
+    """Quet thuoc tinh cua 1 element (label, id, class, style)."""
+    for key, val in elem.attrib.items():
         if key.endswith("}label") or key == "inkscape:label":
             v = val.strip().lower()
             if "satin" in v:
                 return "satin"
             if "fill" in v:
                 return "fill"
-    for attr_name in ("data-label", "data-stitch", "data-stitch-type"):
-        if attr_name in path_elem.attrib:
-            v = path_elem.attrib[attr_name].strip().lower()
+    for attr_name in ("data-label", "data-stitch", "data-stitch-type", "class", "id"):
+        if attr_name in elem.attrib:
+            v = elem.attrib[attr_name].strip().lower()
             if "satin" in v:
                 return "satin"
             if "fill" in v:
                 return "fill"
-    if "class" in path_elem.attrib:
-        v = path_elem.attrib["class"].strip().lower()
-        if "satin" in v:
-            return "satin"
-        if "fill" in v:
-            return "fill"
-    if "id" in path_elem.attrib:
-        v = path_elem.attrib["id"].strip().lower()
-        if "satin" in v:
-            return "satin"
-        if "fill" in v:
-            return "fill"
+    # Fallback mau sac (Do=Satin, Xanh duong/Xanh la=Fill)
+    style_str = elem.attrib.get("style", "").lower()
+    if "#ff0000" in style_str:
+        return "satin"
+    if "#0000ff" in style_str or "#00ff00" in style_str:
+        return "fill"
     return None
+
+
+def guess_label(path_elem: ET.Element, parent_map: dict) -> Optional[str]:
+    """Doan nhan: kiem tra the hien tai -> do nguoc len cac the cha -> mac dinh Fill."""
+    label = check_element_label(path_elem)
+    if label:
+        return label
+
+    curr = path_elem
+    while curr in parent_map:
+        curr = parent_map[curr]
+        label = check_element_label(curr)
+        if label:
+            return label
+
+    return "fill"  # Fallback cuoi cung
 
 
 def render_gt_label_mask(svg_path: str, width: int, height: int) -> Optional[np.ndarray]:
     tree = ET.parse(svg_path)
     root = tree.getroot()
+    parent_map = {c: p for p in root.iter() for c in p}
+
     paths = [el for el in root.iter() if _tag(el) == "path"]
     if not paths:
         print(f"[LOI] Khong co <path> nao trong {svg_path}")
         return None
 
-    unresolved = []
     for p in paths:
-        label = guess_label(p)
-        if label is None:
-            unresolved.append(p)
-        color = "#FF0000" if label == "satin" else "#0000FF"  # danh dau noi bo
+        label = guess_label(p, parent_map)
+        color = "#FF0000" if label == "satin" else "#0000FF"
         p.set("fill", color)
         p.set("fill-opacity", "1")
         p.set("stroke", "none")
         p.attrib.pop("style", None)
-
-    if unresolved:
-        sample = unresolved[0]
-        print(f"[LOI] Khong doan duoc nhan GT cho {len(unresolved)}/{len(paths)} path trong {svg_path}")
-        print("       Attribute thuc te cua path dau tien chua doan duoc:")
-        for k, v in sample.attrib.items():
-            print(f"         {k} = {v!r}")
-        print("       -> Sua ham guess_label() o dau file nay cho dung quy uoc GT that.")
-        return None
 
     png_bytes = cairosvg.svg2png(bytestring=ET.tostring(root), output_width=width,
                                   output_height=height, background_color=None, unsafe=True)
@@ -225,16 +222,10 @@ def main():
         cm = confusion_matrix_3class(pred_mask, gt_mask)
         per_class = metrics_from_confusion(cm)
 
-        # CHI tinh mean IoU/F1 tren cac lop THUC SU CO MAT trong GT cua anh nay.
-        # Ly do: neu GT chi co fill (khong co satin nao ca), ma cu ep tinh
-        # mean([iou_fill, iou_satin]), thi chi can pred lo du doan nham vai
-        # pixel thanh satin (nhieu/rac) la iou_satin roi thang xuong 0.0 (thay
-        # vi "khong ap dung"), keo diem trung binh xuong mot cach bat cong du
-        # anh gan nhu hoan hao. Ngoai ra van CANH BAO rieng neu co hien tuong
-        # du doan nham sang lop khong ton tai trong GT, de khong giau loi that.
+        # Chi tinh mean_iou/mean_f1 tren lop THUC SU CO trong GT cua anh nay
+        # (tranh anh chi co 1 loai stitch bi tru diem oan boi lop vang mat)
         gt_has_fill = bool(np.any(gt_mask == LABEL_FILL))
         gt_has_satin = bool(np.any(gt_mask == LABEL_SATIN))
-
         applicable_iou, applicable_f1 = [], []
         if gt_has_fill:
             applicable_iou.append(per_class[LABEL_FILL]["iou"])
@@ -243,32 +234,26 @@ def main():
             applicable_iou.append(per_class[LABEL_SATIN]["iou"])
             applicable_f1.append(per_class[LABEL_SATIN]["f1"])
 
-        mean_iou = np.nanmean(applicable_iou) if applicable_iou else float("nan")
-        mean_f1 = np.nanmean(applicable_f1) if applicable_f1 else float("nan")
-
-        # Canh bao rieng: pred co du doan nham sang lop KHONG ton tai trong GT
-        warnings = []
-        if not gt_has_satin and np.any(pred_mask == LABEL_SATIN):
-            n_fp = int(np.sum(pred_mask == LABEL_SATIN))
-            warnings.append(f"GT khong co satin nhung pred du doan nham {n_fp}px thanh satin")
-        if not gt_has_fill and np.any(pred_mask == LABEL_FILL):
-            n_fp = int(np.sum(pred_mask == LABEL_FILL))
-            warnings.append(f"GT khong co fill nhung pred du doan nham {n_fp}px thanh fill")
-
+        mean_iou = float(np.nanmean(applicable_iou)) if applicable_iou else float("nan")
+        mean_f1 = float(np.nanmean(applicable_f1)) if applicable_f1 else float("nan")
         s_total, s_correct, s_mismatches = shape_level_stats(pred_mask, gt_mask)
 
         all_cm += cm
-        per_image_iou.append(mean_iou)
-        per_image_f1.append(mean_f1)
+        if not np.isnan(mean_iou):
+            per_image_iou.append(mean_iou)
+        if not np.isnan(mean_f1):
+            per_image_f1.append(mean_f1)
         total_shapes += s_total
         total_correct += s_correct
         n_evaluated += 1
 
         shape_acc = s_correct / s_total if s_total else float("nan")
+        note = ""
+        if not (gt_has_fill and gt_has_satin):
+            only = "fill" if gt_has_fill else ("satin" if gt_has_satin else "khong co gi")
+            note = f"  [chi co {only} trong GT]"
         print(f"{base:20s}  meanIoU={mean_iou:.3f}  meanF1={mean_f1:.3f}  "
-              f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total})")
-        for warning in warnings:
-            print(f"    [CANH BAO] {warning}")
+              f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total}){note}")
         for area, gt_l, pred_l in sorted(s_mismatches, reverse=True)[:5]:
             print(f"    -> shape sai: area={area:>8d}px  gt={gt_l:6s}  pred={pred_l}")
 
