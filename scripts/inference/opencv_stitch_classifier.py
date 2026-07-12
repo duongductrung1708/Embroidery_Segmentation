@@ -3,24 +3,27 @@
 OpenCV Stitch Classifier - Satin vs Fill (rule-based, KHÔNG train model)
 =========================================================================
 
-BẢN CẬP NHẬT: THÊM CONTEXT-AWARE CLASSIFICATION + BATCH MODE
+BẢN CẬP NHẬT: THÊM CONTEXT-AWARE CLASSIFICATION + BATCH MODE (SONG SONG)
 - Chuẩn hóa Canvas về kích thước 4200x4800 chống méo hình.
 - Đo đạc siêu tốc trên ảnh khổng lồ nhờ kỹ thuật Downscaling ma trận tạm thời.
 - LỌC RÁC THÔNG MINH dựa trên Aspect Ratio và Solidity.
 - CONTEXT-AWARE CLASSIFICATION: outline satin bao quanh + dính biên thực sự
   mới ép shape bên trong về fill (tránh chồng 2 lớp satin).
-- MỚI: --batch quét cả thư mục 1 lệnh, tự lưu preview + quantized vào 2
-  thư mục riêng biệt (quantized luôn tách riêng theo yêu cầu).
+- TỐI ƯU HÓA: Chế độ --batch nay đã hỗ trợ xử lý đa tiến trình (Multiprocessing)
+  kết hợp thanh tiến trình tqdm, tăng tốc độ chạy hàng loạt lên nhiều lần 
+  mà GIỮ NGUYÊN 100% logic cốt lõi.
 """
 
 import argparse
 import glob
 import os
 import sys
+import concurrent.futures
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -456,12 +459,12 @@ def save_preview(label_mask: np.ndarray, output_path: str) -> None:
     preview[label_mask == LABEL_FILL] = _PREVIEW_COLOR_FILL
     preview[label_mask == LABEL_SATIN] = _PREVIEW_COLOR_SATIN
     cv2.imwrite(output_path, preview)
-    print(f"Preview saved to {output_path}")
+    # Loại bỏ in ra màn hình để tránh làm nhiễu thanh tiến trình khi chạy đa luồng
 
 
 def save_quantized(working_img_bgr: np.ndarray, output_path: str) -> None:
     cv2.imwrite(output_path, working_img_bgr)
-    print(f"Quantized saved to {output_path}")
+    # Loại bỏ in ra màn hình để tránh làm nhiễu thanh tiến trình khi chạy đa luồng
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +501,44 @@ def find_images_in_dir(folder: str) -> List[str]:
     return sorted(set(files))
 
 
+# ---------------------------------------------------------------------------
+# Worker cho xử lý đa luồng (Batch Processing)
+# ---------------------------------------------------------------------------
+def _batch_worker(kwargs):
+    image_path = kwargs['image_path']
+    base_name = os.path.splitext(os.path.basename(image_path))[0]
+    try:
+        mask, quantized_img = classify_multicolor_image(
+            image_path, 
+            physical_width_mm=kwargs['physical_width_mm'], 
+            threshold_mm=kwargs['threshold_mm'],
+            enable_context_refinement=kwargs['enable_context'], 
+            verbose=False
+        )
+        
+        os.makedirs(kwargs['preview_dir'], exist_ok=True)
+        preview_path = os.path.join(kwargs['preview_dir'], f"{base_name}_pred.png")
+        
+        h, w = mask.shape[:2]
+        preview = np.zeros((h, w, 3), dtype=np.uint8)
+        preview[mask == LABEL_FILL] = _PREVIEW_COLOR_FILL
+        preview[mask == LABEL_SATIN] = _PREVIEW_COLOR_SATIN
+        cv2.imwrite(preview_path, preview)
+
+        if kwargs['quantized_dir']:
+            os.makedirs(kwargs['quantized_dir'], exist_ok=True)
+            quant_path = os.path.join(kwargs['quantized_dir'], f"{base_name}_quantized.png")
+            cv2.imwrite(quant_path, quantized_img)
+
+        n_bg = int((mask == LABEL_BACKGROUND).sum())
+        n_fill = int((mask == LABEL_FILL).sum())
+        n_satin = int((mask == LABEL_SATIN).sum())
+        
+        return {"status": "ok", "base": base_name, "bg": n_bg, "fill": n_fill, "satin": n_satin}
+    except Exception as e:
+        return {"status": "error", "base": base_name, "error": str(e)}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OpenCV Stitch Classifier - Satin vs Fill (rule-based)")
@@ -525,15 +566,30 @@ def main():
         if not image_files:
             print(f"Khong tim thay anh nao trong {args.input}")
             sys.exit(1)
-        print(f"Tim thay {len(image_files)} anh. Bat dau xu ly hang loat...")
-        for i, img_path in enumerate(image_files, 1):
-            print(f"[{i}/{len(image_files)}] {os.path.basename(img_path)}")
-            try:
-                process_one_image(img_path, out_dir, quantized_dir,
-                                   args.physical_width_mm, args.threshold_mm,
-                                   enable_context, args.verbose)
-            except Exception as e:
-                print(f"  [LOI] Bo qua anh nay: {e}")
+            
+        n_workers = max(1, (os.cpu_count() or 2) - 1)
+        print(f"Tim thay {len(image_files)} anh. Bat dau xu ly hang loat ({n_workers} tien trinh song song)...")
+        
+        tasks = []
+        for img_path in image_files:
+            tasks.append({
+                'image_path': img_path,
+                'preview_dir': out_dir,
+                'quantized_dir': quantized_dir,
+                'physical_width_mm': args.physical_width_mm,
+                'threshold_mm': args.threshold_mm,
+                'enable_context': enable_context
+            })
+            
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_batch_worker, t): t for t in tasks}
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(tasks), desc="Dang xu ly", unit="anh"):
+                res = future.result()
+                if res["status"] == "ok":
+                    tqdm.write(f"  -> {res['base']}: bg={res['bg']}  fill={res['fill']}  satin={res['satin']}")
+                else:
+                    tqdm.write(f"  [LOI] {res['base']}: {res['error']}")
+                    
         print(f"\nHoan tat. Preview -> {out_dir}/   Quantized -> {quantized_dir}/")
     else:
         process_one_image(args.input, out_dir, quantized_dir,

@@ -5,6 +5,10 @@ run_opencv_test.py
 - Doan nhan GT da tang (Hierarchical Guessing): tu dong thua ke nhan tu Group
   cha va Fallback theo mau Style (Red=Satin, Blue/Green=Fill), mac dinh Fill
   neu khong doan duoc gi ca.
+- TICH HOP DO THOI GIAN & THANH TIEN TRINH (tqdm).
+- MOI: CHAY SONG SONG NHIEU ANH CUNG LUC (multiprocessing) - moi anh xu ly
+  doc lap hoan toan nen tan dung duoc toi da so CPU core, cong don voi toc do
+  moi anh da nhanh hon ~3 lan nho cac toi uu trong opencv_stitch_classifier.py.
 - Log day du: MACRO (trung binh moi anh) + MICRO (gop tat ca pixel) +
   SHAPE-LEVEL (gop tat ca shape), giong dinh dang bao cao chuan cua ban.
 """
@@ -13,6 +17,8 @@ import glob
 import os
 import sys
 import xml.etree.ElementTree as ET
+import time
+import concurrent.futures
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
@@ -20,6 +26,7 @@ import cairosvg
 import cv2
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 # =============================================================================
 # SUA DUONG DAN GOC CHO DUNG MAY BAN
@@ -31,6 +38,10 @@ SVG_DIR = os.path.join(OPENCV_TEST_DIR, "svg")
 PREDICTIONS_DIR = os.path.join(OPENCV_TEST_DIR, "predictions")
 QUANTIZED_DIR = os.path.join(OPENCV_TEST_DIR, "quantized")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+# MOI: so tien trinh song song. None = tu dong dung (so CPU - 1, toi thieu 1).
+# Chinh tay neu muon gioi han (vd may yeu RAM, moi anh ~4200x4800 kha nang).
+N_WORKERS: Optional[int] = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opencv_stitch_classifier import (
@@ -64,7 +75,6 @@ def check_element_label(elem: ET.Element) -> Optional[str]:
                 return "satin"
             if "fill" in v:
                 return "fill"
-    # Fallback mau sac (Do=Satin, Xanh duong/Xanh la=Fill)
     style_str = elem.attrib.get("style", "").lower()
     if "#ff0000" in style_str:
         return "satin"
@@ -96,7 +106,6 @@ def render_gt_label_mask(svg_path: str, width: int, height: int) -> Optional[np.
 
     paths = [el for el in root.iter() if _tag(el) == "path"]
     if not paths:
-        print(f"[LOI] Khong co <path> nao trong {svg_path}")
         return None
 
     for p in paths:
@@ -181,6 +190,66 @@ def find_matching_image(base_name: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# MOI: don vi cong viec cho 1 anh - chay trong WORKER PROCESS RIENG.
+# Tra ve dict ket qua NHE (khong chua mang anh lon) de giam chi phi truyen
+# du lieu giua cac tien trinh (IPC pickle overhead).
+# ---------------------------------------------------------------------------
+def _process_one_svg(svg_path: str) -> dict:
+    base = os.path.splitext(os.path.basename(svg_path))[0]
+    image_path = find_matching_image(base)
+
+    if image_path is None:
+        return {"base": base, "status": "no_image"}
+
+    start_img_time = time.perf_counter()
+    try:
+        pred_mask, quantized_img = classify_multicolor_image(image_path, verbose=False)
+    except Exception as e:
+        return {"base": base, "status": "error", "error": str(e)}
+
+    save_preview(pred_mask, os.path.join(PREDICTIONS_DIR, f"{base}_pred.png"))
+    save_quantized(quantized_img, os.path.join(QUANTIZED_DIR, f"{base}_quantized.png"))
+
+    h, w = pred_mask.shape[:2]
+    gt_mask = render_gt_label_mask(svg_path, width=w, height=h)
+    if gt_mask is None:
+        return {"base": base, "status": "no_gt"}
+
+    cm = confusion_matrix_3class(pred_mask, gt_mask)
+    per_class = metrics_from_confusion(cm)
+
+    gt_has_fill = bool(np.any(gt_mask == LABEL_FILL))
+    gt_has_satin = bool(np.any(gt_mask == LABEL_SATIN))
+    applicable_iou, applicable_f1 = [], []
+    if gt_has_fill:
+        applicable_iou.append(per_class[LABEL_FILL]["iou"])
+        applicable_f1.append(per_class[LABEL_FILL]["f1"])
+    if gt_has_satin:
+        applicable_iou.append(per_class[LABEL_SATIN]["iou"])
+        applicable_f1.append(per_class[LABEL_SATIN]["f1"])
+
+    mean_iou = float(np.nanmean(applicable_iou)) if applicable_iou else float("nan")
+    mean_f1 = float(np.nanmean(applicable_f1)) if applicable_f1 else float("nan")
+    s_total, s_correct, s_mismatches = shape_level_stats(pred_mask, gt_mask)
+
+    img_time = time.perf_counter() - start_img_time
+
+    return {
+        "base": base,
+        "status": "ok",
+        "cm": cm,
+        "mean_iou": mean_iou,
+        "mean_f1": mean_f1,
+        "s_total": s_total,
+        "s_correct": s_correct,
+        "s_mismatches": s_mismatches,
+        "gt_has_fill": gt_has_fill,
+        "gt_has_satin": gt_has_satin,
+        "img_time": img_time,
+    }
+
+
 def main():
     os.makedirs(PREDICTIONS_DIR, exist_ok=True)
     os.makedirs(QUANTIZED_DIR, exist_ok=True)
@@ -195,70 +264,89 @@ def main():
     total_shapes, total_correct = 0, 0
     n_evaluated, n_skipped = 0, 0
 
-    for svg_path in svg_files:
-        base = os.path.splitext(os.path.basename(svg_path))[0]
-        image_path = find_matching_image(base)
-        if image_path is None:
-            print(f"[bo qua] khong tim thay anh khop voi '{base}' truc tiep trong {OPENCV_TEST_DIR}")
-            n_skipped += 1
-            continue
+    n_workers = N_WORKERS or max(1, (os.cpu_count() or 2) - 1)
 
-        try:
-            pred_mask, quantized_img = classify_multicolor_image(image_path, verbose=False)
-        except Exception as e:
-            print(f"[loi] classify that bai cho '{base}': {e}")
-            n_skipped += 1
-            continue
+    print("=" * 60)
+    print("BAT DAU CHAY DANH GIA (BATCH MODE - SONG SONG)")
+    print(f"So tien trinh song song: {n_workers}")
+    print("=" * 60)
 
-        save_preview(pred_mask, os.path.join(PREDICTIONS_DIR, f"{base}_pred.png"))
-        save_quantized(quantized_img, os.path.join(QUANTIZED_DIR, f"{base}_quantized.png"))
+    start_total_time = time.perf_counter()
 
-        h, w = pred_mask.shape[:2]
-        gt_mask = render_gt_label_mask(svg_path, width=w, height=h)
-        if gt_mask is None:
-            n_skipped += 1
-            continue
+    # MOI: chay song song nhieu anh cung luc bang ProcessPoolExecutor. Moi anh
+    # doc lap hoan toan (khong chia se state) nen an toan de chay song song.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_process_one_svg, svg_path): svg_path
+                   for svg_path in svg_files}
 
-        cm = confusion_matrix_3class(pred_mask, gt_mask)
-        per_class = metrics_from_confusion(cm)
+        for future in tqdm(concurrent.futures.as_completed(futures),
+                            total=len(svg_files), desc="Dang danh gia", unit="anh"):
+            svg_path = futures[future]
+            base_fallback = os.path.splitext(os.path.basename(svg_path))[0]
 
-        # Chi tinh mean_iou/mean_f1 tren lop THUC SU CO trong GT cua anh nay
-        # (tranh anh chi co 1 loai stitch bi tru diem oan boi lop vang mat)
-        gt_has_fill = bool(np.any(gt_mask == LABEL_FILL))
-        gt_has_satin = bool(np.any(gt_mask == LABEL_SATIN))
-        applicable_iou, applicable_f1 = [], []
-        if gt_has_fill:
-            applicable_iou.append(per_class[LABEL_FILL]["iou"])
-            applicable_f1.append(per_class[LABEL_FILL]["f1"])
-        if gt_has_satin:
-            applicable_iou.append(per_class[LABEL_SATIN]["iou"])
-            applicable_f1.append(per_class[LABEL_SATIN]["f1"])
+            try:
+                result = future.result()
+            except Exception as e:
+                tqdm.write(f"[loi nghiem trong] '{base_fallback}': {e}")
+                n_skipped += 1
+                continue
 
-        mean_iou = float(np.nanmean(applicable_iou)) if applicable_iou else float("nan")
-        mean_f1 = float(np.nanmean(applicable_f1)) if applicable_f1 else float("nan")
-        s_total, s_correct, s_mismatches = shape_level_stats(pred_mask, gt_mask)
+            base = result["base"]
+            status = result["status"]
 
-        all_cm += cm
-        if not np.isnan(mean_iou):
-            per_image_iou.append(mean_iou)
-        if not np.isnan(mean_f1):
-            per_image_f1.append(mean_f1)
-        total_shapes += s_total
-        total_correct += s_correct
-        n_evaluated += 1
+            if status == "no_image":
+                tqdm.write(f"[bo qua] khong tim thay anh khop voi '{base}' "
+                           f"truc tiep trong {OPENCV_TEST_DIR}")
+                n_skipped += 1
+                continue
+            if status == "error":
+                tqdm.write(f"[loi] classify that bai cho '{base}': {result['error']}")
+                n_skipped += 1
+                continue
+            if status == "no_gt":
+                tqdm.write(f"[LOI] Khong co <path> nao trong SVG cua '{base}'")
+                n_skipped += 1
+                continue
 
-        shape_acc = s_correct / s_total if s_total else float("nan")
-        note = ""
-        if not (gt_has_fill and gt_has_satin):
-            only = "fill" if gt_has_fill else ("satin" if gt_has_satin else "khong co gi")
-            note = f"  [chi co {only} trong GT]"
-        print(f"{base:20s}  meanIoU={mean_iou:.3f}  meanF1={mean_f1:.3f}  "
-              f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total}){note}")
-        for area, gt_l, pred_l in sorted(s_mismatches, reverse=True)[:5]:
-            print(f"    -> shape sai: area={area:>8d}px  gt={gt_l:6s}  pred={pred_l}")
+            # status == "ok"
+            cm = result["cm"]
+            mean_iou = result["mean_iou"]
+            mean_f1 = result["mean_f1"]
+            s_total = result["s_total"]
+            s_correct = result["s_correct"]
+            s_mismatches = result["s_mismatches"]
+            gt_has_fill = result["gt_has_fill"]
+            gt_has_satin = result["gt_has_satin"]
+            img_time = result["img_time"]
+
+            all_cm += cm
+            if not np.isnan(mean_iou):
+                per_image_iou.append(mean_iou)
+            if not np.isnan(mean_f1):
+                per_image_f1.append(mean_f1)
+            total_shapes += s_total
+            total_correct += s_correct
+            n_evaluated += 1
+
+            shape_acc = s_correct / s_total if s_total else float("nan")
+            note = ""
+            if not (gt_has_fill and gt_has_satin):
+                only = "fill" if gt_has_fill else ("satin" if gt_has_satin else "khong co gi")
+                note = f"  [chi co {only} trong GT]"
+
+            tqdm.write(f"{base:20s} | {img_time:5.2f}s | meanIoU={mean_iou:.3f} | meanF1={mean_f1:.3f} | "
+                       f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total}){note}")
+
+            for area, gt_l, pred_l in sorted(s_mismatches, reverse=True)[:5]:
+                tqdm.write(f"    -> shape sai: area={area:>8d}px  gt={gt_l:6s}  pred={pred_l}")
+
+    end_total_time = time.perf_counter()
 
     print("\n" + "=" * 60)
     print(f"DA DANH GIA: {n_evaluated} anh  (bo qua: {n_skipped})")
+    print(f"TONG THOI GIAN: {end_total_time - start_total_time:.2f} giay "
+          f"({n_workers} tien trinh song song)")
+
     if n_evaluated == 0:
         return
 
