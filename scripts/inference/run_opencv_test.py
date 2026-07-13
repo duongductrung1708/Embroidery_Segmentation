@@ -49,6 +49,7 @@ OPENCV_TEST_DIR = "data/opencv_test"
 SVG_DIR = os.path.join(OPENCV_TEST_DIR, "svg")
 PREDICTIONS_DIR = os.path.join(OPENCV_TEST_DIR, "predictions")
 QUANTIZED_DIR = os.path.join(OPENCV_TEST_DIR, "quantized")
+GT_PREVIEW_DIR = os.path.join(OPENCV_TEST_DIR, "gt_preview")  # MOI: luu anh GT de log len wandb doi chieu
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 # MOI: so tien trinh song song. None = tu dong dung (so CPU - 1, toi thieu 1).
@@ -61,7 +62,7 @@ WANDB_ENABLED = True                              # dat False de tat han, khong 
 WANDB_PROJECT = "embroidery-stitch-classifier"    # doi ten project cho dung workspace cua ban
 WANDB_ENTITY: Optional[str] = None                # doi neu dung team/org rieng, None = mac dinh tai khoan
 WANDB_RUN_NAME: Optional[str] = None              # None = de wandb tu dat ten (vd "different-cloud-12")
-WANDB_LOG_IMAGES = False                          # Bat True de upload anh preview len wandb (cham hon, ton bang thong)
+WANDB_LOG_IMAGES = True                           # Upload anh (goc/predict/GT) len wandb de doi chieu truc quan. Dat False neu batch qua lon (tiet kiem bang thong/thoi gian upload)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opencv_stitch_classifier import (
@@ -255,6 +256,11 @@ def _process_one_svg(svg_path: str) -> dict:
     mean_f1 = float(np.nanmean(applicable_f1)) if applicable_f1 else float("nan")
     s_total, s_correct, s_mismatches = shape_level_stats(pred_mask, gt_mask)
 
+    # MOI: luu them anh preview cua GT (cung bang mau voi pred) de log len wandb
+    # doi chieu truc quan canh nhau (goc / predict / ground-truth).
+    gt_preview_path = os.path.join(GT_PREVIEW_DIR, f"{base}_gt.png")
+    save_preview(gt_mask, gt_preview_path)
+
     img_time = time.perf_counter() - start_img_time
 
     return {
@@ -269,13 +275,18 @@ def _process_one_svg(svg_path: str) -> dict:
         "gt_has_fill": gt_has_fill,
         "gt_has_satin": gt_has_satin,
         "img_time": img_time,
-        "pred_path": pred_path,  # MOI: de log anh len wandb neu can (doc lai tu dia, khong truyen mang qua IPC)
+        # MOI: de log len wandb neu can (doc lai tu dia, khong truyen mang anh
+        # qua IPC giua cac process - vua cham vua ton bo nho).
+        "image_path": image_path,
+        "pred_path": pred_path,
+        "gt_preview_path": gt_preview_path,
     }
 
 
 def main():
     os.makedirs(PREDICTIONS_DIR, exist_ok=True)
     os.makedirs(QUANTIZED_DIR, exist_ok=True)
+    os.makedirs(GT_PREVIEW_DIR, exist_ok=True)
 
     svg_files = sorted(glob.glob(os.path.join(SVG_DIR, "*.svg")))
     if not svg_files:
@@ -311,7 +322,11 @@ def main():
         )
         wandb_table = wandb.Table(columns=[
             "image", "iou", "f1", "shape_acc", "shapes_total", "shapes_correct",
-            "time_s", "note", "preview",
+            "time_s", "note",
+            "bg_iou", "bg_precision", "bg_recall", "bg_f1",
+            "fill_iou", "fill_precision", "fill_recall", "fill_f1",
+            "satin_iou", "satin_precision", "satin_recall", "satin_f1",
+            "original", "predicted", "ground_truth",
         ])
 
     print("=" * 60)
@@ -369,6 +384,11 @@ def main():
             gt_has_satin = result["gt_has_satin"]
             img_time = result["img_time"]
 
+            # MOI: chi so CHI TIET theo tung lop (background/fill/satin) cho
+            # RIENG anh nay - khac voi mean_iou/mean_f1 (von la trung binh
+            # GOP fill+satin). Tinh lai tu cm (ma tran nhe, khong ton kem).
+            per_class = metrics_from_confusion(cm)
+
             all_cm += cm
             if not np.isnan(mean_iou):
                 per_image_iou.append(mean_iou)
@@ -387,12 +407,16 @@ def main():
             note_display = f"  [{note}]" if note else ""
             tqdm.write(f"{base:20s} | {img_time:5.2f}s | meanIoU={mean_iou:.3f} | meanF1={mean_f1:.3f} | "
                        f"shape_acc={shape_acc:.3f} ({s_correct}/{s_total}){note_display}")
+            tqdm.write(f"    bg: IoU={per_class[LABEL_BACKGROUND]['iou']:.3f}  "
+                       f"fill: IoU={per_class[LABEL_FILL]['iou']:.3f}  "
+                       f"satin: IoU={per_class[LABEL_SATIN]['iou']:.3f}")
 
             for area, gt_l, pred_l in sorted(s_mismatches, reverse=True)[:5]:
                 tqdm.write(f"    -> shape sai: area={area:>8d}px  gt={gt_l:6s}  pred={pred_l}")
 
             # MOI: log metric theo tung anh len wandb (real-time, xem duoc ngay
-            # tren dashboard trong khi batch dang chay)
+            # tren dashboard trong khi batch dang chay) - bao gom CA chi so
+            # rieng cho background/fill/satin, khong chi mean gop fill+satin.
             if use_wandb:
                 log_dict = {
                     "per_image/iou": mean_iou,
@@ -400,18 +424,35 @@ def main():
                     "per_image/shape_acc": shape_acc,
                     "per_image/time_s": img_time,
                 }
+                for c in range(3):
+                    cname = CLASS_NAMES[c]
+                    m = per_class[c]
+                    log_dict[f"per_image/{cname}_iou"] = m["iou"]
+                    log_dict[f"per_image/{cname}_precision"] = m["precision"]
+                    log_dict[f"per_image/{cname}_recall"] = m["recall"]
+                    log_dict[f"per_image/{cname}_f1"] = m["f1"]
                 wandb.log(log_dict)
 
-                preview_img = None
+                # MOI: log ca 3 anh (goc / predict / ground-truth) canh nhau
+                # trong cung 1 hang cua bang, de doi chieu truc quan tren wandb UI.
+                original_img, predicted_img, gt_img = None, None, None
                 if WANDB_LOG_IMAGES:
                     try:
-                        preview_img = wandb.Image(result["pred_path"], caption=base)
-                    except Exception:
-                        preview_img = None
+                        original_img = wandb.Image(result["image_path"], caption=f"{base} (goc)")
+                        predicted_img = wandb.Image(result["pred_path"], caption=f"{base} (predict)")
+                        gt_img = wandb.Image(result["gt_preview_path"], caption=f"{base} (ground truth)")
+                    except Exception as e:
+                        tqdm.write(f"    [canh bao] khong log duoc anh cho '{base}': {e}")
+                        original_img, predicted_img, gt_img = None, None, None
 
+                bg_m, fill_m, satin_m = per_class[LABEL_BACKGROUND], per_class[LABEL_FILL], per_class[LABEL_SATIN]
                 wandb_table.add_data(
                     base, mean_iou, mean_f1, shape_acc, s_total, s_correct,
-                    img_time, note, preview_img,
+                    img_time, note,
+                    bg_m["iou"], bg_m["precision"], bg_m["recall"], bg_m["f1"],
+                    fill_m["iou"], fill_m["precision"], fill_m["recall"], fill_m["f1"],
+                    satin_m["iou"], satin_m["precision"], satin_m["recall"], satin_m["f1"],
+                    original_img, predicted_img, gt_img,
                 )
 
     end_total_time = time.perf_counter()
