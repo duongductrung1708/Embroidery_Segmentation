@@ -206,8 +206,16 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
     if label is None:
         if is_outermost and is_hollow and thickness_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
             label = "satin"
+        # Thêm luật này vào trước nhánh 'is_hollow'
+        elif solidity < 0.4 and aspect_ratio < 1.5:
+            # Đây là các nét vẽ có dạng vòng cung/uốn lượn mảnh, cho phép Satin tối đa
+            label = "satin" if thickness_mm <= (threshold_mm * 2.5) else "fill"
         elif is_hollow:
-            label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
+            # Nâng mốc lên 0.82 để chữ A (0.77) được lọt vào cửa khoan hồng
+            if solidity < 0.82: 
+                label = "satin" if thickness_mm <= (threshold_mm * 1.6) else "fill"
+            else:
+                label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
         elif not is_hollow and (solidity < 0.75 or aspect_ratio > 2.5):
             label = "satin" if thickness_mm <= (threshold_mm * 2.0) else "fill"
         elif solidity >= 0.75:
