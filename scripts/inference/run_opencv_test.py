@@ -8,6 +8,9 @@ run_opencv_test.py
 - LOG LEN WEIGHTS & BIASES (wandb): Ghep 3 anh thanh 1 cot duy nhat tren RAM.
 - LỌC RÁC: Xóa các hạt nhiễu < 50px trước khi chấm điểm.
 - CHI SO CHINH: PIXEL-LEVEL IOU & F1 (Do chinh xac tren tung diem anh).
+- MOI: DU DOAN TRUC TIEP TREN FILE SVG (classify_svg) thay vi tren anh PNG
+  da render + gop mau. Anh raster (neu co) chi con duoc dung de hien thi cot
+  "Goc" trong bang so sanh, khong con anh huong den ket qua du doan.
 """
 
 import glob
@@ -56,7 +59,7 @@ WANDB_LOG_IMAGES = True
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opencv_stitch_classifier import (
-    classify_multicolor_image, save_preview, save_quantized,
+    classify_svg, save_preview, save_quantized,
     LABEL_BACKGROUND, LABEL_FILL, LABEL_SATIN,
     DEFAULT_PHYSICAL_WIDTH_MM, DEFAULT_THRESHOLD_MM,
 )
@@ -172,6 +175,8 @@ def metrics_from_confusion(cm: np.ndarray) -> Dict[int, Dict[str, float]]:
 
 
 def find_matching_image(base_name: str) -> Optional[str]:
+    """Chi dung de HIEN THI cot 'Goc' trong bang so sanh - khong con anh huong
+    den ket qua du doan (du doan gio doc truc tiep tu file SVG)."""
     for ext in IMAGE_EXTS:
         candidate = os.path.join(OPENCV_TEST_DIR, base_name + ext)
         if os.path.exists(candidate):
@@ -181,12 +186,12 @@ def find_matching_image(base_name: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Lọc rác (Loại bỏ các cụm pixel siêu nhỏ do nhiễu/render lỗi)
 # ---------------------------------------------------------------------------
-def remove_small_components(mask: np.ndarray, min_area_px: int = 50) -> np.ndarray:
+def remove_small_components(mask: np.ndarray, min_area_px: int = 4) -> np.ndarray:
     cleaned_mask = mask.copy()
     for label_val in (LABEL_FILL, LABEL_SATIN):
         class_mask = (cleaned_mask == label_val).astype(np.uint8)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(class_mask, connectivity=8)
-        
+
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
             if area < min_area_px:
@@ -236,23 +241,23 @@ def _build_comparison_image(image_path: str, pred_path: str, gt_path: str,
 # ---------------------------------------------------------------------------
 def _process_one_svg(svg_path: str) -> dict:
     base = os.path.splitext(os.path.basename(svg_path))[0]
-    image_path = find_matching_image(base)
-
-    if image_path is None:
-        return {"base": base, "status": "no_image"}
+    # Anh raster (neu co) gio chi dung de hien thi cot "Goc", KHONG con dung
+    # de du doan - du doan chay truc tiep tren svg_path ben duoi.
+    raster_image_path = find_matching_image(base)
 
     start_img_time = time.perf_counter()
     try:
-        pred_mask, quantized_img = classify_multicolor_image(image_path, verbose=False)
+        pred_mask, rendered_img = classify_svg(svg_path, verbose=False)
     except Exception as e:
         return {"base": base, "status": "error", "error": str(e)}
 
     # Dọn rác cho Prediction
-    pred_mask = remove_small_components(pred_mask, min_area_px=50)
+    pred_mask = remove_small_components(pred_mask, min_area_px=4)
 
     pred_path = os.path.join(PREDICTIONS_DIR, f"{base}_pred.png")
     save_preview(pred_mask, pred_path)
-    save_quantized(quantized_img, os.path.join(QUANTIZED_DIR, f"{base}_quantized.png"))
+    quantized_path = os.path.join(QUANTIZED_DIR, f"{base}_quantized.png")
+    save_quantized(rendered_img, quantized_path)
 
     h, w = pred_mask.shape[:2]
     gt_mask = render_gt_label_mask(svg_path, width=w, height=h)
@@ -260,7 +265,7 @@ def _process_one_svg(svg_path: str) -> dict:
         return {"base": base, "status": "no_gt"}
 
     # Dọn rác cho Ground Truth (nhiễu viền SVG)
-    gt_mask = remove_small_components(gt_mask, min_area_px=50)
+    gt_mask = remove_small_components(gt_mask, min_area_px=4)
 
     cm = confusion_matrix_3class(pred_mask, gt_mask)
     per_class = metrics_from_confusion(cm)
@@ -280,9 +285,13 @@ def _process_one_svg(svg_path: str) -> dict:
 
     gt_preview_path = os.path.join(GT_PREVIEW_DIR, f"{base}_gt.png")
     save_preview(gt_mask, gt_preview_path)
-    
+
+    # Cot "Goc": uu tien anh raster that neu tim thay, khong thi dung ban da
+    # render tu SVG (da luu o quantized_path o tren).
+    goc_image_path = raster_image_path if raster_image_path is not None else quantized_path
+
     # Tao anh comparison trong RAM va chuyen sang RGB cho wandb
-    composite_bgr = _build_comparison_image(image_path, pred_path, gt_preview_path)
+    composite_bgr = _build_comparison_image(goc_image_path, pred_path, gt_preview_path)
     composite_rgb = cv2.cvtColor(composite_bgr, cv2.COLOR_BGR2RGB)
 
     img_time = time.perf_counter() - start_img_time
@@ -334,6 +343,7 @@ def main():
                 "threshold_mm": DEFAULT_THRESHOLD_MM,
                 "svg_dir": SVG_DIR,
                 "primary_metric": "pixel-level",
+                "prediction_source": "svg",
             },
         )
         wandb_table = wandb.Table(columns=[
@@ -347,7 +357,7 @@ def main():
     print("=" * 60)
     print("BAT DAU CHAY DANH GIA (BATCH MODE - SONG SONG)")
     print(f"So tien trinh song song: {n_workers}")
-    print("CHI SO CHINH: PIXEL-LEVEL")
+    print("CHI SO CHINH: PIXEL-LEVEL | NGUON DU DOAN: SVG (truc tiep tung <path>)")
     if use_wandb:
         print(f"Wandb: BAT ({WANDB_PROJECT})")
     print("=" * 60)
@@ -373,13 +383,8 @@ def main():
             base = result["base"]
             status = result["status"]
 
-            if status == "no_image":
-                tqdm.write(f"[bo qua] khong tim thay anh khop voi '{base}' "
-                           f"truc tiep trong {OPENCV_TEST_DIR}")
-                n_skipped += 1
-                continue
             if status == "error":
-                tqdm.write(f"[loi] classify that bai cho '{base}': {result['error']}")
+                tqdm.write(f"[loi] classify_svg that bai cho '{base}': {result['error']}")
                 n_skipped += 1
                 continue
             if status == "no_gt":

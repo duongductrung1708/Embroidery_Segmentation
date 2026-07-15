@@ -10,20 +10,32 @@ BẢN CẬP NHẬT: THÊM CONTEXT-AWARE CLASSIFICATION + BATCH MODE (SONG SONG)
 - CONTEXT-AWARE CLASSIFICATION: outline satin bao quanh + dính biên thực sự
   mới ép shape bên trong về fill (tránh chồng 2 lớp satin).
 - TỐI ƯU HÓA: Chế độ --batch nay đã hỗ trợ xử lý đa tiến trình (Multiprocessing)
-  kết hợp thanh tiến trình tqdm, tăng tốc độ chạy hàng loạt lên nhiều lần 
+  kết hợp thanh tiến trình tqdm, tăng tốc độ chạy hàng loạt lên nhiều lần
   mà GIỮ NGUYÊN 100% logic cốt lõi.
+- MỚI: DỰ ĐOÁN TRỰC TIẾP TRÊN FILE SVG (classify_svg) — rasterize từng <path>
+  riêng lẻ (thay vì group theo màu từ ảnh PNG đã render) rồi tái sử dụng đúng
+  logic hình học (thickness/solidity/aspect ratio) để phân loại satin/fill.
 """
 
 import argparse
+import copy
 import glob
 import os
 import sys
 import concurrent.futures
+import xml.etree.ElementTree as ET
+from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
+
+try:
+    import cairosvg
+except ImportError:
+    cairosvg = None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -33,10 +45,17 @@ LABEL_FILL = 1
 LABEL_SATIN = 2
 
 DEFAULT_PHYSICAL_WIDTH_MM = 80.0
-DEFAULT_THRESHOLD_MM = 2.0
-OUTER_BORDER_MAX_THICKNESS_MM = 8.0
+
+# NGUONG CHUNG DUY NHAT (khong tuning theo tung anh/tung shape nua):
+# thickness_mm <= threshold_mm  -> SATIN (mac dinh)
+# thickness_mm >  threshold_mm  -> FILL  (mac dinh)
+# Chi co 2 truong hop DAC BIET duoc xu ly rieng (xem _classify_shape):
+#   1) manh rac/nhieu qua nho (duoi MIN_PHYSICAL_STITCH_MM va dien tich qua nho)
+#   2) context-aware refinement o buoc sau (outline satin bao ngoai ep shape con vao fill)
+DEFAULT_THRESHOLD_MM = 12.0
 
 MIN_PHYSICAL_STITCH_MM = 0.4
+MIN_NOISE_AREA_MM2 = 0.2
 CONTEXT_CONTAINMENT_RATIO = 0.5
 CONTEXT_TOUCH_DILATION_PX = 3
 
@@ -44,6 +63,9 @@ _PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan  (hien thi mau VANG that)
 _PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+DEFAULT_SVG_CANVAS_W = 4200
+DEFAULT_SVG_CANVAS_H = 4800
 
 
 class Shape:
@@ -189,39 +211,24 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
         "is_outermost": is_outermost
     }
 
-    label = None
-
+    # -------------------------------------------------------------------
+    # DAC BIET DUY NHAT con giu lai: loc RAC/NHIEU that su (manh vun sieu
+    # mong ma may khong the thieu duoc VA dien tich khong dang ke). Neu du
+    # dien tich thi KHONG con coi la rac nua - se roi xuong dung quy tac
+    # chung ben duoi (thickness cang nho thi cang chac chan la satin).
+    # -------------------------------------------------------------------
     if thickness_mm < MIN_PHYSICAL_STITCH_MM:
-        if solidity >= 0.75:
-            area_mm2 = true_area_px * (pixel_to_mm ** 2)
-            if area_mm2 >= 0.2:
-                label = "satin"
-            else:
-                return "noise", details
-        elif aspect_ratio > 2.5:
-            label = "satin"
-        else:
+        area_mm2 = true_area_px * (pixel_to_mm ** 2)
+        if area_mm2 < MIN_NOISE_AREA_MM2:
             return "noise", details
 
-    if label is None:
-        if is_outermost and is_hollow and thickness_mm <= OUTER_BORDER_MAX_THICKNESS_MM:
-            label = "satin"
-        # Thêm luật này vào trước nhánh 'is_hollow'
-        elif solidity < 0.4 and aspect_ratio < 1.5:
-            # Đây là các nét vẽ có dạng vòng cung/uốn lượn mảnh, cho phép Satin tối đa
-            label = "satin" if thickness_mm <= (threshold_mm * 2.5) else "fill"
-        elif is_hollow:
-            # Nâng mốc lên 0.82 để chữ A (0.77) được lọt vào cửa khoan hồng
-            if solidity < 0.82: 
-                label = "satin" if thickness_mm <= (threshold_mm * 1.6) else "fill"
-            else:
-                label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
-        elif not is_hollow and (solidity < 0.75 or aspect_ratio > 2.5):
-            label = "satin" if thickness_mm <= (threshold_mm * 2.0) else "fill"
-        elif solidity >= 0.75:
-            label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
-        else:
-            label = "satin" if thickness_mm <= (threshold_mm * 1.5) else "fill"
+    # -------------------------------------------------------------------
+    # QUY TAC CHUNG DUY NHAT, AP DUNG DONG NHAT CHO MOI SHAPE - khong con
+    # phan biet theo solidity / aspect-ratio / is_hollow / is_outermost nua:
+    #   thickness_mm <= threshold_mm (mac dinh 20mm) -> SATIN
+    #   thickness_mm >  threshold_mm                 -> FILL
+    # -------------------------------------------------------------------
+    label = "satin" if thickness_mm <= threshold_mm else "fill"
 
     return label, details
 
@@ -459,6 +466,129 @@ def classify_multicolor_image(image_path: str,
 
 
 # ---------------------------------------------------------------------------
+# MOI: Du doan truc tiep tren file SVG (khong can rasterize thanh 1 anh PNG
+# gop mau roi group theo mau nua - moi <path> duoc rasterize rieng va cham
+# diem hinh hoc doc lap, tai su dung dung logic classify_binary_mask).
+# ---------------------------------------------------------------------------
+def _tag(elem: ET.Element) -> str:
+    return elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+
+
+def _render_single_path_mask(svg_root: ET.Element, path_index: int,
+                              canvas_w: int, canvas_h: int) -> np.ndarray:
+    """Rasterize DUY NHAT 1 <path> (theo thu tu duyet path_index), an het cac
+    path con lai, tra ve mask nhi phan (0/1) cua rieng path do tren canvas chuan."""
+    if cairosvg is None:
+        raise ImportError("Can cai dat 'cairosvg' de rasterize SVG (pip install cairosvg).")
+
+    root_copy = copy.deepcopy(svg_root)
+    path_elems_copy = [el for el in root_copy.iter() if _tag(el) == "path"]
+
+    for i, el in enumerate(path_elems_copy):
+        if i == path_index:
+            el.set("fill", "#000000")
+            el.set("fill-opacity", "1")
+            el.set("stroke", "none")
+            el.attrib.pop("style", None)
+            el.attrib.pop("display", None)
+        else:
+            el.set("display", "none")
+
+    png_bytes = cairosvg.svg2png(bytestring=ET.tostring(root_copy), output_width=canvas_w,
+                                  output_height=canvas_h, background_color=None, unsafe=True)
+    img = np.array(Image.open(BytesIO(png_bytes)).convert("RGBA"))
+    alpha = img[:, :, 3]
+    return (alpha >= 128).astype(np.uint8)
+
+
+def classify_svg(svg_path: str,
+                  physical_width_mm: float = DEFAULT_PHYSICAL_WIDTH_MM,
+                  threshold_mm: float = DEFAULT_THRESHOLD_MM,
+                  canvas_w: int = DEFAULT_SVG_CANVAS_W,
+                  canvas_h: int = DEFAULT_SVG_CANVAS_H,
+                  min_region_pixels: int = 5,
+                  enable_context_refinement: bool = True,
+                  verbose: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Du doan satin/fill TRUC TIEP tu file SVG (thay vi tu anh PNG da render + gop mau).
+
+    Moi <path> trong SVG duoc rasterize RIENG LE thanh 1 mask nhi phan tren canvas
+    chuan (mac dinh 4200x4800), sau do duoc dua qua dung pipeline hinh hoc hien co
+    (classify_binary_mask: contour/hull/solidity/aspect-ratio/distance-transform)
+    de quyet dinh satin hay fill. Context-aware refinement (outline satin bao
+    quanh ep shape con vao fill) van duoc ap dung tren toan bo cac shape gom duoc
+    tu tat ca cac path.
+
+    Tra ve (label_mask, rendered_img_bgr) - rendered_img_bgr la ban render mau day
+    du cua SVG (dung thay cho "quantized image" trong ket qua truoc day, chi de
+    tham khao/hien thi).
+    """
+    if cairosvg is None:
+        raise ImportError("Can cai dat 'cairosvg' de doc va rasterize file SVG (pip install cairosvg).")
+
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+    path_elems = [el for el in root.iter() if _tag(el) == "path"]
+
+    canvas_shape = (canvas_h, canvas_w)
+    label_mask = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+
+    # Anh mau day du (render toan bo SVG 1 lan) - chi de hien thi / luu quantized.
+    full_png = cairosvg.svg2png(url=svg_path, output_width=canvas_w, output_height=canvas_h,
+                                 background_color="#FFFFFF", unsafe=True)
+    full_rgb = np.array(Image.open(BytesIO(full_png)).convert("RGB"))
+    rendered_img_bgr = cv2.cvtColor(full_rgb, cv2.COLOR_RGB2BGR)
+
+    if not path_elems:
+        return label_mask, rendered_img_bgr
+
+    total_fg = np.zeros((canvas_h, canvas_w), dtype=bool)
+    global_records: List[_GlobalShapeRecord] = []
+    global_id_counter = 0
+
+    path_iter = enumerate(path_elems)
+    if verbose:
+        path_iter = tqdm(list(path_iter), desc="Rasterizing paths", unit="path", leave=False)
+
+    for idx, _ in path_iter:
+        path_mask01 = _render_single_path_mask(root, idx, canvas_w, canvas_h)
+        n_pixels = int(path_mask01.sum())
+        if n_pixels < min_region_pixels:
+            continue
+        total_fg |= path_mask01.astype(bool)
+
+        binary_mask_255 = (path_mask01 * 255).astype(np.uint8)
+        shapes, sub_label_mask = classify_binary_mask(
+            binary_mask_255, physical_width_mm=physical_width_mm,
+            threshold_mm=threshold_mm, verbose=verbose,
+        )
+        label_mask[sub_label_mask > 0] = sub_label_mask[sub_label_mask > 0]
+
+        for shape in shapes:
+            if shape.label not in ("satin", "fill"):
+                continue
+            shape.global_id = global_id_counter
+            global_id_counter += 1
+            shape_mask_full = shape_to_mask(shape, canvas_shape)
+            area_px = int(np.count_nonzero(shape_mask_full))
+            global_records.append(_GlobalShapeRecord(shape, shape_mask_full, area_px))
+
+        if verbose:
+            print(f"Path #{idx}: {n_pixels}px -> {len(shapes)} shape(s)")
+
+    if enable_context_refinement and global_records:
+        if verbose:
+            print(">> Dang chay Context-aware refinement (outline satin -> fill ben trong)...")
+        label_mask = refine_labels_by_context(
+            global_records, label_mask, canvas_shape, verbose=verbose
+        )
+
+    label_mask = fill_unlabeled_gaps(label_mask, total_fg)
+
+    return label_mask, rendered_img_bgr
+
+
+# ---------------------------------------------------------------------------
 # Xuat anh
 # ---------------------------------------------------------------------------
 def save_preview(label_mask: np.ndarray, output_path: str) -> None:
@@ -467,12 +597,10 @@ def save_preview(label_mask: np.ndarray, output_path: str) -> None:
     preview[label_mask == LABEL_FILL] = _PREVIEW_COLOR_FILL
     preview[label_mask == LABEL_SATIN] = _PREVIEW_COLOR_SATIN
     cv2.imwrite(output_path, preview)
-    # Loại bỏ in ra màn hình để tránh làm nhiễu thanh tiến trình khi chạy đa luồng
 
 
 def save_quantized(working_img_bgr: np.ndarray, output_path: str) -> None:
     cv2.imwrite(output_path, working_img_bgr)
-    # Loại bỏ in ra màn hình để tránh làm nhiễu thanh tiến trình khi chạy đa luồng
 
 
 # ---------------------------------------------------------------------------
@@ -483,10 +611,16 @@ def process_one_image(image_path: str, preview_dir: str, quantized_dir: str,
                        enable_context_refinement: bool, verbose: bool) -> None:
     base_name = os.path.splitext(os.path.basename(image_path))[0]
 
-    mask, quantized_img = classify_multicolor_image(
-        image_path, physical_width_mm=physical_width_mm, threshold_mm=threshold_mm,
-        enable_context_refinement=enable_context_refinement, verbose=verbose,
-    )
+    if image_path.lower().endswith(".svg"):
+        mask, quantized_img = classify_svg(
+            image_path, physical_width_mm=physical_width_mm, threshold_mm=threshold_mm,
+            enable_context_refinement=enable_context_refinement, verbose=verbose,
+        )
+    else:
+        mask, quantized_img = classify_multicolor_image(
+            image_path, physical_width_mm=physical_width_mm, threshold_mm=threshold_mm,
+            enable_context_refinement=enable_context_refinement, verbose=verbose,
+        )
 
     os.makedirs(preview_dir, exist_ok=True)
     save_preview(mask, os.path.join(preview_dir, f"{base_name}_pred.png"))
@@ -509,6 +643,11 @@ def find_images_in_dir(folder: str) -> List[str]:
     return sorted(set(files))
 
 
+def find_svgs_in_dir(folder: str) -> List[str]:
+    return sorted(set(glob.glob(os.path.join(folder, "*.svg")) +
+                       glob.glob(os.path.join(folder, "*.SVG"))))
+
+
 # ---------------------------------------------------------------------------
 # Worker cho xử lý đa luồng (Batch Processing)
 # ---------------------------------------------------------------------------
@@ -516,17 +655,26 @@ def _batch_worker(kwargs):
     image_path = kwargs['image_path']
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     try:
-        mask, quantized_img = classify_multicolor_image(
-            image_path, 
-            physical_width_mm=kwargs['physical_width_mm'], 
-            threshold_mm=kwargs['threshold_mm'],
-            enable_context_refinement=kwargs['enable_context'], 
-            verbose=False
-        )
-        
+        if image_path.lower().endswith(".svg"):
+            mask, quantized_img = classify_svg(
+                image_path,
+                physical_width_mm=kwargs['physical_width_mm'],
+                threshold_mm=kwargs['threshold_mm'],
+                enable_context_refinement=kwargs['enable_context'],
+                verbose=False
+            )
+        else:
+            mask, quantized_img = classify_multicolor_image(
+                image_path,
+                physical_width_mm=kwargs['physical_width_mm'],
+                threshold_mm=kwargs['threshold_mm'],
+                enable_context_refinement=kwargs['enable_context'],
+                verbose=False
+            )
+
         os.makedirs(kwargs['preview_dir'], exist_ok=True)
         preview_path = os.path.join(kwargs['preview_dir'], f"{base_name}_pred.png")
-        
+
         h, w = mask.shape[:2]
         preview = np.zeros((h, w, 3), dtype=np.uint8)
         preview[mask == LABEL_FILL] = _PREVIEW_COLOR_FILL
@@ -541,7 +689,7 @@ def _batch_worker(kwargs):
         n_bg = int((mask == LABEL_BACKGROUND).sum())
         n_fill = int((mask == LABEL_FILL).sum())
         n_satin = int((mask == LABEL_SATIN).sum())
-        
+
         return {"status": "ok", "base": base_name, "bg": n_bg, "fill": n_fill, "satin": n_satin}
     except Exception as e:
         return {"status": "error", "base": base_name, "error": str(e)}
@@ -550,7 +698,7 @@ def _batch_worker(kwargs):
 def main():
     parser = argparse.ArgumentParser(
         description="OpenCV Stitch Classifier - Satin vs Fill (rule-based)")
-    parser.add_argument("input", help="1 file anh, HOAC 1 thu muc neu dung --batch")
+    parser.add_argument("input", help="1 file anh/SVG, HOAC 1 thu muc neu dung --batch")
     parser.add_argument("--out-dir", default="opencv_test",
                          help="Thu muc goc luu preview (mac dinh: opencv_test)")
     parser.add_argument("--quantized-dir", default=None,
@@ -560,6 +708,9 @@ def main():
     parser.add_argument("--threshold-mm", type=float, default=DEFAULT_THRESHOLD_MM)
     parser.add_argument("--batch", action="store_true",
                          help="Neu bat: 'input' la 1 THU MUC, quet toan bo anh ben trong")
+    parser.add_argument("--svg", action="store_true",
+                         help="Neu bat: xu ly file/thu muc SVG thay vi anh PNG/JPG "
+                              "(du doan truc tiep tren <path> cua SVG)")
     parser.add_argument("--no-context", action="store_true",
                          help="Tat context-aware refinement (outline satin -> fill)")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -570,14 +721,14 @@ def main():
     enable_context = not args.no_context
 
     if args.batch:
-        image_files = find_images_in_dir(args.input)
+        image_files = find_svgs_in_dir(args.input) if args.svg else find_images_in_dir(args.input)
         if not image_files:
-            print(f"Khong tim thay anh nao trong {args.input}")
+            print(f"Khong tim thay {'SVG' if args.svg else 'anh'} nao trong {args.input}")
             sys.exit(1)
-            
+
         n_workers = max(1, (os.cpu_count() or 2) - 1)
-        print(f"Tim thay {len(image_files)} anh. Bat dau xu ly hang loat ({n_workers} tien trinh song song)...")
-        
+        print(f"Tim thay {len(image_files)} file. Bat dau xu ly hang loat ({n_workers} tien trinh song song)...")
+
         tasks = []
         for img_path in image_files:
             tasks.append({
@@ -588,16 +739,16 @@ def main():
                 'threshold_mm': args.threshold_mm,
                 'enable_context': enable_context
             })
-            
+
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_batch_worker, t): t for t in tasks}
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(tasks), desc="Dang xu ly", unit="anh"):
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(tasks), desc="Dang xu ly", unit="file"):
                 res = future.result()
                 if res["status"] == "ok":
                     tqdm.write(f"  -> {res['base']}: bg={res['bg']}  fill={res['fill']}  satin={res['satin']}")
                 else:
                     tqdm.write(f"  [LOI] {res['base']}: {res['error']}")
-                    
+
         print(f"\nHoan tat. Preview -> {out_dir}/   Quantized -> {quantized_dir}/")
     else:
         process_one_image(args.input, out_dir, quantized_dir,
