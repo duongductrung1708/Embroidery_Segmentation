@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Single Image PNG to SVG Converter with Manual Boolean Cutout & Auto Labeling
-Sử dụng thuật toán Skeletonize + Structural Heuristics
-Đã fix lỗi phân biệt "Viền ngoài Satin" và "Chữ O lớn Fill"
+Sử dụng thuật toán Skeletonize + Auto-Crop Bounding Box + Luật 12mm
 """
 
 import os
@@ -136,9 +135,11 @@ class HighPrecisionSVGParser:
         return root, elements
 
     def _extract_elements(self, parent: ET.Element, elements: List[SVGElement], document_order: List[int]):
+        # Bổ sung các thẻ hợp lệ
+        valid_tags = {"rect", "circle", "ellipse", "polygon", "polyline", "path", "line"}
         for child in parent:
             tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-            if tag in ["rect", "circle", "ellipse", "polygon", "polyline", "path"]:
+            if tag in valid_tags:
                 svg_elem = SVGElement(child, document_order[0])
                 document_order[0] += 1
                 svg_elem.geometry = self._element_to_high_precision_geometry(child)
@@ -264,7 +265,7 @@ class StrictCutoutProcessor:
 
 
 # ==========================================
-# THUẬT TOÁN ĐA LUẬT ĐÃ FIX LỖI (OUTER BORDER vs BIG 'O')
+# THUẬT TOÁN ĐA LUẬT ĐÃ ĐƯỢC CHUẨN HÓA LẠI (AUTO-CROP + 12MM RULE)
 # ==========================================
 def auto_label_elements_advanced(
     elements: List[SVGElement], 
@@ -273,10 +274,23 @@ def auto_label_elements_advanced(
     physical_width_mm: float, 
     threshold_mm: float
 ):
-    print(f"  Tự động gán nhãn AI (Heuristics + Skeleton) | Kích thước: {physical_width_mm}mm...")
+    print(f"  Tự động gán nhãn AI (Luật cứng {threshold_mm}mm + Auto-Crop) | Kích thước: {physical_width_mm}mm...")
     
-    pixel_to_mm = physical_width_mm / max(canvas_w, 1.0)
-    canvas_area = canvas_w * canvas_h
+    # --- AUTO-CROP KÍCH THƯỚC THỰC TẾ ---
+    min_x_global, max_x_global = float('inf'), float('-inf')
+    valid_elems_exist = False
+    
+    for elem in elements:
+        if elem.geometry and not elem.geometry.is_empty:
+            min_x, _, max_x, _ = elem.geometry.bounds
+            if min_x < min_x_global: min_x_global = min_x
+            if max_x > max_x_global: max_x_global = max_x
+            valid_elems_exist = True
+            
+    crop_w = (max_x_global - min_x_global) if valid_elems_exist else canvas_w
+    pixel_to_mm = physical_width_mm / max(float(crop_w), 1.0)
+    
+    print(f"    -> Auto-Crop: Chiều rộng thực tế {crop_w:.1f}px -> Tỷ lệ: 1px = {pixel_to_mm:.5f}mm")
     
     mask_h, mask_w = int(canvas_h), int(canvas_w)
     if mask_h <= 0 or mask_w <= 0:
@@ -284,17 +298,7 @@ def auto_label_elements_advanced(
         
     satin_count = 0
     fill_count = 0
-
-    # --- BƯỚC 0: TÌM VÀ ĐỊNH VỊ OUTER BORDER THỰC SỰ ---
-    # Thay vì mảng rỗng nào cũng là viền, chỉ duy nhất mảng bao trùm lớn nhất mới là viền.
-    max_hull_area = 0
-    outer_border_id = None
-    for elem in elements:
-        if elem.geometry and not elem.geometry.is_empty:
-            ha = elem.geometry.convex_hull.area
-            if ha > max_hull_area:
-                max_hull_area = ha
-                outer_border_id = elem.id
+    noise_count = 0
 
     for elem in elements:
         if elem.geometry is None or elem.geometry.is_empty:
@@ -302,23 +306,9 @@ def auto_label_elements_advanced(
             continue
             
         geom = elem.geometry
-        
-        # 1. Các chỉ số hình học
         area_px = geom.area
-        hull_area_px = geom.convex_hull.area
-        solidity = area_px / hull_area_px if hull_area_px > 0 else 1.0
-        
-        min_x, min_y, max_x, max_y = geom.bounds
-        w, h = max_x - min_x, max_y - min_y
-        aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 100.0
-        
-        is_hollow = False
-        if isinstance(geom, Polygon):
-            is_hollow = len(geom.interiors) > 0
-        elif isinstance(geom, MultiPolygon):
-            is_hollow = any(len(p.interiors) > 0 for p in geom.geoms)
 
-        # 2. Skeleton Median Thickness
+        # Skeleton Median Thickness (Giữ nguyên logic quét của bạn)
         mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
         
         def draw_polygon(poly, mask_arr):
@@ -351,48 +341,20 @@ def auto_label_elements_advanced(
         except:
             thickness_mm = (np.max(dist) * 2.0) * pixel_to_mm
 
-        # --- 3. BỘ LUẬT PHÂN LOẠI (RULE TREE) ---
+        # --- BỘ LUẬT CHUNG DUY NHẤT ĐÃ LOẠI BỎ HỆ SỐ MÙ MỜ ---
+        area_mm2 = area_px * (pixel_to_mm ** 2)
         
-        # Cờ đánh dấu: Có phải là mảng lớn nhất bao trùm cả logo không?
-        is_outermost = (elem.id == outer_border_id) and ((hull_area_px / canvas_area) > 0.4)
-        
-        # Rule 1: Outer Border THỰC SỰ
-        # Nếu là mảng ngoài cùng, có lỗ rỗng, và độ dày KHÔNG LỚN HƠN 8.0mm (Giới hạn viền vá lớn nhất)
-        if is_outermost and is_hollow and thickness_mm <= 8.0:
+        if thickness_mm < 0.4 and area_mm2 < 0.2:
+            elem.label = "noise"
+            noise_count += 1
+        elif thickness_mm <= threshold_mm:
             elem.label = "satin"
-            
-        # Rule 2: Các chữ O, hình tròn rỗng bên trong (Hoặc viền ngoài nhưng siêu khổng lồ)
-        elif is_hollow:
-            if thickness_mm >= threshold_mm:
-                elem.label = "fill"
-            else:
-                elem.label = "satin"
-                
-        # Rule 3: Chữ cái, nét ngoằn ngoèo không có lỗ rỗng (Ví dụ chữ S, C, M...)
-        # Solidity thấp chứng tỏ nó không phải là mảng đặc
-        elif solidity < 0.65 and thickness_mm < (threshold_mm * 1.5):
-            elem.label = "satin"
-            
-        # Rule 4: Dải nét dài và hẹp
-        # Dù hơi dày (ví dụ 3-4mm) nhưng kéo dài (Aspect Ratio > 4.0) -> Satin
-        elif aspect_ratio > 4.0 and thickness_mm <= 4.0:
-            elem.label = "satin"
-            
-        # Rule 5: Khối đặc lớn (Compact Solid Blob)
-        elif solidity > 0.85 and thickness_mm >= threshold_mm:
-            elem.label = "fill"
-            
-        # Fallback dựa vào Median Thickness
+            satin_count += 1
         else:
-            if thickness_mm < threshold_mm:
-                elem.label = "satin"
-            else:
-                elem.label = "fill"
-                
-        if elem.label == "satin": satin_count += 1
-        else: fill_count += 1
+            elem.label = "fill"
+            fill_count += 1
         
-    print(f"    -> Đã gán {satin_count} Satin, {fill_count} Fill.")
+    print(f"    -> Đã gán {satin_count} Satin, {fill_count} Fill. Loại bỏ {noise_count} nét rác.")
 
 
 def _polygon_to_path(polygon: Polygon) -> str:
@@ -411,7 +373,7 @@ def _polygon_to_path(polygon: Polygon) -> str:
     return path_data
 
 
-def convert_stack_to_cutout(svg_path: str, area_threshold=10.0, physical_width_mm=80.0, threshold_mm=2.0):
+def convert_stack_to_cutout(svg_path: str, area_threshold=10.0, physical_width_mm=80.0, threshold_mm=12.0):
     try:
         parser = HighPrecisionSVGParser()
         processor = StrictCutoutProcessor(area_threshold=area_threshold)
@@ -445,6 +407,10 @@ def convert_stack_to_cutout(svg_path: str, area_threshold=10.0, physical_width_m
         new_root.set(f"{{{INKSCAPE_NS}}}version", "1.0")
         
         for element in cutout_elements:
+            # --- BỎ QUA HOÀN TOÀN CÁC PHẦN RÁC ---
+            if element.label == "noise":
+                continue
+                
             if element.geometry and not element.geometry.is_empty:
                 path_data = _polygon_to_path(element.geometry) if isinstance(element.geometry, Polygon) else " ".join([_polygon_to_path(p) for p in element.geometry.geoms])
                 if path_data:
@@ -510,7 +476,7 @@ def process_single_image(input_path: str, output_path: str = None, use_fal: bool
         return False
     
     LOGO_PHYSICAL_WIDTH = 80.0 
-    THICKNESS_THRESHOLD = 2.0  
+    THICKNESS_THRESHOLD = 12.0  # <--- Đã cập nhật thành 12mm
     
     convert_stack_to_cutout(
         output_path, 
