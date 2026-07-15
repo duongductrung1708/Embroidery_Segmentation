@@ -8,11 +8,28 @@ run_opencv_test.py
 - LOG LEN WEIGHTS & BIASES (wandb): Ghep 3 anh thanh 1 cot duy nhat tren RAM.
 - LỌC RÁC: Xóa các hạt nhiễu < 50px trước khi chấm điểm.
 - CHI SO CHINH: PIXEL-LEVEL IOU & F1 (Do chinh xac tren tung diem anh).
-- MOI: DU DOAN TRUC TIEP TREN FILE SVG (classify_svg) thay vi tren anh PNG
+- DU DOAN TRUC TIEP TREN FILE SVG (classify_svg) thay vi tren anh PNG
   da render + gop mau. Anh raster (neu co) chi con duoc dung de hien thi cot
   "Goc" trong bang so sanh, khong con anh huong den ket qua du doan.
+
+===============================================================================
+TOI UU TOC DO (SPEEDUP PATCH):
+- classify_svg (trong opencv_stitch_classifier.py) gio chay phan loai hinh
+  hoc (quyet dinh satin/fill) tren 1 canvas THU NHO cho nhanh, nhung anh
+  label_mask CUOI CUNG van duoc RENDER VECTOR 1 LAN DUY NHAT o full-res
+  (giong cach lam Ground-Truth) - nen bien hinh van MUOT, KHONG bi rang cua
+  do resize pixel. Xem chi tiet trong file do.
+- Moi file .svg TRUOC DAY bi ET.parse() 2 LAN doc lap (1 lan ben trong
+  classify_svg, 1 lan ben trong render_gt_label_mask) -> gio chi parse 1 LAN
+  DUY NHAT trong _process_one_svg, roi truyen thang ET.Element (root) da
+  parse cho ca 2 ham (render_gt_label_mask duoc truyen 1 BAN SAO rieng vi no
+  se MUTATE cay XML de gan mau nhan GT).
+- save_preview/save_quantized (dung chung tu opencv_stitch_classifier.py)
+  gio ghi PNG voi muc nen thap hon -> ghi file nhanh hon dang ke.
+===============================================================================
 """
 
+import copy
 import glob
 import os
 import sys
@@ -48,6 +65,11 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 N_WORKERS: Optional[int] = None
 
+# Ty le canvas dung cho buoc phan loai hinh hoc nhanh cua classify_svg (xem
+# SVG_CLASSIFY_SCALE trong opencv_stitch_classifier.py). Giam so nay xuong
+# neu muon chay nhanh hon nua (danh doi mot chut chi tiet hinh hoc nho).
+CLASSIFY_SCALE: Optional[float] = None  # None = dung mac dinh cua module
+
 # ---------------------------------------------------------------------------
 # Cau hinh Weights & Biases
 # ---------------------------------------------------------------------------
@@ -55,6 +77,9 @@ WANDB_ENABLED = True
 WANDB_PROJECT = "embroidery-stitch-classifier"
 WANDB_ENTITY: Optional[str] = None
 WANDB_RUN_NAME: Optional[str] = None
+# Ghi chu toc do: moi anh comparison (goc/predict/GT ghep lai) va upload len
+# wandb deu ton them thoi gian dang ke. Neu chi can xem chi so (khong can
+# xem truc quan tung anh), dat WANDB_LOG_IMAGES = False de chay nhanh hon.
 WANDB_LOG_IMAGES = True
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -62,6 +87,7 @@ from opencv_stitch_classifier import (
     classify_svg, save_preview, save_quantized,
     LABEL_BACKGROUND, LABEL_FILL, LABEL_SATIN,
     DEFAULT_PHYSICAL_WIDTH_MM, DEFAULT_THRESHOLD_MM,
+    SVG_CLASSIFY_SCALE,
 )
 
 CLASS_NAMES = {LABEL_BACKGROUND: "background", LABEL_FILL: "fill", LABEL_SATIN: "satin"}
@@ -114,9 +140,18 @@ def guess_label(path_elem: ET.Element, parent_map: dict) -> Optional[str]:
     return "fill"
 
 
-def render_gt_label_mask(svg_path: str, width: int, height: int) -> Optional[np.ndarray]:
-    tree = ET.parse(svg_path)
-    root = tree.getroot()
+def render_gt_label_mask(svg_path: str, width: int, height: int,
+                          pre_parsed_root: Optional[ET.Element] = None) -> Optional[np.ndarray]:
+    """Tinh mask nhan GT. Neu duoc truyen san `pre_parsed_root` (mot BAN SAO
+    rieng, vi ham nay se MUTATE cay XML de gan mau theo nhan doan duoc), se
+    dung luon thay vi doc + parse lai file tu dau (tranh I/O + parse XML
+    thua khi da parse file nay o noi khac trong cung 1 lan xu ly)."""
+    if pre_parsed_root is not None:
+        root = pre_parsed_root
+    else:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+
     parent_map = {c: p for p in root.iter() for c in p}
 
     paths = [el for el in root.iter() if _tag(el) == "path"]
@@ -246,8 +281,22 @@ def _process_one_svg(svg_path: str) -> dict:
     raster_image_path = find_matching_image(base)
 
     start_img_time = time.perf_counter()
+
+    # TOI UU: parse SVG DUY NHAT 1 LAN o day, roi tai su dung cho ca
+    # classify_svg (du doan) lan render_gt_label_mask (GT) - thay vi de moi
+    # ham tu doc + parse lai file tu dau (I/O + parse XML thua).
     try:
-        pred_mask, rendered_img = classify_svg(svg_path, verbose=False)
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+    except Exception as e:
+        return {"base": base, "status": "error", "error": f"Loi parse SVG: {e}"}
+
+    try:
+        pred_mask, rendered_img = classify_svg(
+            svg_path, pre_parsed_root=root,
+            classify_scale=CLASSIFY_SCALE or SVG_CLASSIFY_SCALE,
+            verbose=False,
+        )
     except Exception as e:
         return {"base": base, "status": "error", "error": str(e)}
 
@@ -260,7 +309,11 @@ def _process_one_svg(svg_path: str) -> dict:
     save_quantized(rendered_img, quantized_path)
 
     h, w = pred_mask.shape[:2]
-    gt_mask = render_gt_label_mask(svg_path, width=w, height=h)
+    # render_gt_label_mask MUTATE cay XML (gan mau theo nhan doan duoc) nen
+    # truyen 1 BAN SAO rieng cua root, khong dung chung voi ban da dung cho
+    # classify_svg o tren (de tranh xung dot trang thai).
+    gt_mask = render_gt_label_mask(svg_path, width=w, height=h,
+                                    pre_parsed_root=copy.deepcopy(root))
     if gt_mask is None:
         return {"base": base, "status": "no_gt"}
 
@@ -341,6 +394,7 @@ def main():
                 "n_workers": n_workers,
                 "physical_width_mm": DEFAULT_PHYSICAL_WIDTH_MM,
                 "threshold_mm": DEFAULT_THRESHOLD_MM,
+                "classify_scale": CLASSIFY_SCALE or SVG_CLASSIFY_SCALE,
                 "svg_dir": SVG_DIR,
                 "primary_metric": "pixel-level",
                 "prediction_source": "svg",
@@ -357,6 +411,7 @@ def main():
     print("=" * 60)
     print("BAT DAU CHAY DANH GIA (BATCH MODE - SONG SONG)")
     print(f"So tien trinh song song: {n_workers}")
+    print(f"Classify scale (canvas thu nho cho fast pass): {CLASSIFY_SCALE or SVG_CLASSIFY_SCALE:.3f}")
     print("CHI SO CHINH: PIXEL-LEVEL | NGUON DU DOAN: SVG (truc tiep tung <path>)")
     if use_wandb:
         print(f"Wandb: BAT ({WANDB_PROJECT})")

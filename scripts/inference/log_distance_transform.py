@@ -106,4 +106,4 @@ def debug_shape_thickness_fixed(image_path, physical_width_mm=80.0):
     plt.show()
 
 # Hãy thay đường dẫn ảnh của bạn vào đây
-debug_shape_thickness_fixed('data/opencv_test/133.png', physical_width_mm=80.0)
+debug_shape_thickness_fixed('data/svg/clean_png/102.png', physical_width_mm=80.0)
