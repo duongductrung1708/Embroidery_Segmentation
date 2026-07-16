@@ -86,8 +86,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opencv_stitch_classifier import (
     classify_svg, save_preview, save_quantized,
     LABEL_BACKGROUND, LABEL_FILL, LABEL_SATIN,
-    DEFAULT_PHYSICAL_WIDTH_MM, DEFAULT_THRESHOLD_MM,
-    SVG_CLASSIFY_SCALE,
+    DEFAULT_PHYSICAL_WIDTH_MM, SVG_CLASSIFY_SCALE,
 )
 
 CLASS_NAMES = {LABEL_BACKGROUND: "background", LABEL_FILL: "fill", LABEL_SATIN: "satin"}
@@ -276,15 +275,10 @@ def _build_comparison_image(image_path: str, pred_path: str, gt_path: str,
 # ---------------------------------------------------------------------------
 def _process_one_svg(svg_path: str) -> dict:
     base = os.path.splitext(os.path.basename(svg_path))[0]
-    # Anh raster (neu co) gio chi dung de hien thi cot "Goc", KHONG con dung
-    # de du doan - du doan chay truc tiep tren svg_path ben duoi.
     raster_image_path = find_matching_image(base)
 
     start_img_time = time.perf_counter()
 
-    # TOI UU: parse SVG DUY NHAT 1 LAN o day, roi tai su dung cho ca
-    # classify_svg (du doan) lan render_gt_label_mask (GT) - thay vi de moi
-    # ham tu doc + parse lai file tu dau (I/O + parse XML thua).
     try:
         tree = ET.parse(svg_path)
         root = tree.getroot()
@@ -309,9 +303,6 @@ def _process_one_svg(svg_path: str) -> dict:
     save_quantized(rendered_img, quantized_path)
 
     h, w = pred_mask.shape[:2]
-    # render_gt_label_mask MUTATE cay XML (gan mau theo nhan doan duoc) nen
-    # truyen 1 BAN SAO rieng cua root, khong dung chung voi ban da dung cho
-    # classify_svg o tren (de tranh xung dot trang thai).
     gt_mask = render_gt_label_mask(svg_path, width=w, height=h,
                                     pre_parsed_root=copy.deepcopy(root))
     if gt_mask is None:
@@ -339,11 +330,8 @@ def _process_one_svg(svg_path: str) -> dict:
     gt_preview_path = os.path.join(GT_PREVIEW_DIR, f"{base}_gt.png")
     save_preview(gt_mask, gt_preview_path)
 
-    # Cot "Goc": uu tien anh raster that neu tim thay, khong thi dung ban da
-    # render tu SVG (da luu o quantized_path o tren).
     goc_image_path = raster_image_path if raster_image_path is not None else quantized_path
 
-    # Tao anh comparison trong RAM va chuyen sang RGB cho wandb
     composite_bgr = _build_comparison_image(goc_image_path, pred_path, gt_preview_path)
     composite_rgb = cv2.cvtColor(composite_bgr, cv2.COLOR_BGR2RGB)
 
@@ -358,7 +346,7 @@ def _process_one_svg(svg_path: str) -> dict:
         "gt_has_fill": gt_has_fill,
         "gt_has_satin": gt_has_satin,
         "img_time": img_time,
-        "comparison_img": composite_rgb, # Truyen truc tiep array
+        "comparison_img": composite_rgb, 
     }
 
 
@@ -393,7 +381,7 @@ def main():
                 "n_images_found": len(svg_files),
                 "n_workers": n_workers,
                 "physical_width_mm": DEFAULT_PHYSICAL_WIDTH_MM,
-                "threshold_mm": DEFAULT_THRESHOLD_MM,
+                "threshold_mm": "dynamic (1/5 logo width)", # Đã sửa thành hiển thị Text cho wandb
                 "classify_scale": CLASSIFY_SCALE or SVG_CLASSIFY_SCALE,
                 "svg_dir": SVG_DIR,
                 "primary_metric": "pixel-level",
