@@ -9,6 +9,35 @@ BẢN CẬP NHẬT: THUẬT TOÁN INK RATIO CHỐNG "NỀN GIẢ VIỀN"
   tổng lượng mực của cả logo VÀ khá đặc (Solidity > 0.45) -> Chắc chắn là NỀN (Fill),
   bất chấp nó bị đục lỗ làm sai lệch độ dày.
 - Khắc phục triệt để hiệu ứng Domino ép sai các nét mảnh bên trong vòng tròn.
+
+===============================================================================
+FIX (skeleton-median KHÔNG bất biến theo chiều dài shape):
+Debug thực tế (xem script debug_shape_thickness_fixed) phát hiện: 3 cột có
+bề rộng THẬT SỰ giống hệt nhau (~14.6-14.8mm, đo bằng minAreaRect & max
+distance) nhưng do hình dạng có đầu vát/nhọn (parallelogram nghiêng), khi
+tính "median qua skeleton" lại ra 3 kết quả khác hẳn nhau: 6.86 / 9.96 /
+14.32mm.
+
+Nguyên nhân: đoạn "vát" ở 2 đầu shape (nơi bề rộng ramp từ 0 lên full) có
+ĐỘ DÀI TUYỆT ĐỐI gần như cố định (phụ thuộc góc vát, không phụ thuộc chiều
+dài shape), nhưng chiếm TỶ LỆ % rất khác nhau trên tổng chiều dài khung
+xương (skeleton) tùy shape ngắn hay dài. Shape càng NGẮN thì đoạn vát chiếm
+% skeleton càng lớn -> median (thống kê theo % số điểm) bị "kéo tụt" xuống
+gần giá trị ở đầu vát thay vì giá trị bề rộng thật ở phần thân. Cùng 1 bề
+rộng thật, các cột dài/ngắn khác nhau bị đo ra thickness khác nhau hoàn
+toàn - hoàn toàn sai với ý nghĩa vật lý (bề rộng không phụ thuộc chiều
+dài).
+
+SỬA: với shape gần lồi (solidity cao) và KHÔNG có lỗ, dùng bề rộng cạnh
+ngắn của `cv2.minAreaRect` (hình chữ nhật bao nhỏ nhất) làm thước đo bề
+rộng - đây là phép đo hình học thuần túy, BẤT BIẾN hoàn toàn theo chiều dài
+shape. Chỉ tin giá trị này khi nó "hợp lý" (nằm trong khoảng
+[0.5x, 1.2x] so với max_thickness đo bằng distance-transform) để tránh
+dùng nhầm cho các shape dạng L/T/chữ thập... có solidity cao "giả tạo".
+Nếu không hội đủ điều kiện (shape lõm/có lỗ, ví dụ chữ cái, nét cong, vòng
+tròn có lỗ), vẫn dùng skeleton-median như cũ vì minAreaRect lúc đó không
+còn đại diện đúng cho bề rộng nét.
+===============================================================================
 """
 
 import argparse
@@ -47,7 +76,16 @@ DEFAULT_PHYSICAL_WIDTH_MM = 80.0
 MIN_PHYSICAL_STITCH_MM = 0.4
 MIN_NOISE_AREA_MM2 = 0.2
 CONTEXT_CONTAINMENT_RATIO = 0.5
-TOUCH_DILATION_PHYSICAL_MM = 0.5 
+TOUCH_DILATION_PHYSICAL_MM = 0.5
+
+# FIX (skeleton-median): shape duoc coi la "gan loi" (du tin minAreaRect
+# lam thuoc do be rong) khi solidity >= nguong nay.
+SOLIDITY_TRUST_MINRECT = 0.92
+# FIX (skeleton-median): chi chap nhan minAreaRect short-side khi no nam
+# trong khoang [MINRECT_SANITY_LOW, MINRECT_SANITY_HIGH] x max_thickness -
+# tranh dung nham cho shape dang L/T/chu thap co solidity cao "gia tao".
+MINRECT_SANITY_LOW = 0.5
+MINRECT_SANITY_HIGH = 1.2
 
 _PREVIEW_COLOR_FILL = (0, 255, 255)   # Cyan (Hiện màu Vàng)
 _PREVIEW_COLOR_SATIN = (255, 0, 255)  # Magenta (Hiện màu Hồng)
@@ -185,14 +223,31 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
     aspect_ratio = long_side / short_side if short_side > 0 else 100.0
 
     is_hollow = len(shape.holes) > 0
-    thickness_median_mm, thickness_max_mm = thickness_mm_from_mask(mask, pixel_to_mm)
-    thickness_mm = thickness_median_mm
+    thickness_skeleton_mm, thickness_max_mm = thickness_mm_from_mask(mask, pixel_to_mm)
+
+    # FIX (skeleton-median khong bat bien theo chieu dai shape): voi shape
+    # GAN LOI (solidity cao) va KHONG CO LO, minAreaRect short-side la
+    # thuoc do be rong CHINH XAC va BAT BIEN theo chieu dai - uu tien dung
+    # no thay vi skeleton-median (von bi lech boi ty le % dai cua doan vat
+    # dau shape so voi tong chieu dai skeleton). Chi tin minAreaRect khi no
+    # "hop ly" so voi max_thickness (tranh nham voi shape L/T/chu thap co
+    # solidity cao gia tao do dac diem hinh hoc rieng).
+    minrect_short_mm = short_side * pixel_to_mm
+    thickness_source = "skeleton-median"
+    thickness_mm = thickness_skeleton_mm
+    if solidity >= SOLIDITY_TRUST_MINRECT and not is_hollow:
+        if MINRECT_SANITY_LOW * thickness_max_mm <= minrect_short_mm <= MINRECT_SANITY_HIGH * thickness_max_mm:
+            thickness_mm = minrect_short_mm
+            thickness_source = "minAreaRect"
 
     is_outermost = (is_outer_candidate and canvas_area > 0 and (hull_area_px / canvas_area) > 0.4)
 
     details = {
-        "thickness_mm": thickness_median_mm,
+        "thickness_mm": thickness_mm,
+        "thickness_skeleton_mm": thickness_skeleton_mm,
+        "thickness_minrect_mm": minrect_short_mm,
         "thickness_max_mm": thickness_max_mm,
+        "thickness_source": thickness_source,
         "solidity": solidity,
         "ink_ratio": ink_ratio,
         "aspect_ratio": aspect_ratio,
@@ -263,7 +318,11 @@ def classify_binary_mask(binary_mask: np.ndarray,
             label_mask[final_draw_mask] = label_value
 
         if verbose:
-            print(f"  Shape {shape.id}: med={details['thickness_mm']:.3f}mm, "
+            print(f"  Shape {shape.id}: thick={details['thickness_mm']:.3f}mm "
+                  f"[{details['thickness_source']}] "
+                  f"(skel={details['thickness_skeleton_mm']:.3f}, "
+                  f"minrect={details['thickness_minrect_mm']:.3f}, "
+                  f"max={details['thickness_max_mm']:.3f}), "
                   f"sol={details['solidity']:.2f}, ink={details['ink_ratio']:.2f} -> {label.upper()}")
 
     return shapes, label_mask
