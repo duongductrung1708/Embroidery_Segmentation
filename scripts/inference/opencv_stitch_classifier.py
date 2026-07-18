@@ -250,6 +250,7 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
     aspect_ratio = long_side / short_side if short_side > 0 else 100.0
 
     is_hollow = len(shape.holes) > 0
+    num_holes = len(shape.holes)
     minrect_short_mm = short_side * pixel_to_mm
 
     # TOI UU: tinh max_thickness TRUOC (khong skeletonize - buoc cham
@@ -281,6 +282,16 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
         thickness_mm = thickness_skeleton_mm
         thickness_source = "skeleton-median"
 
+    # --- BẢN FIX: ĐO ĐỘ DÀY LẤP LỖ (CÓ ĐIỀU KIỆN) ---
+    filled_thickness_mm = 0.0
+    if num_holes >= 4 and solidity > 0.40:
+        filled_mask = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.drawContours(filled_mask, [shape.contour], -1, 1, thickness=cv2.FILLED)
+        # Đo max thickness nhanh trên bản đã lấp lỗ (không cần skeleton)
+        _, filled_thickness_mm = thickness_mm_from_mask(
+            filled_mask, pixel_to_mm, contour=shape.contour, need_skeleton=False
+        )
+
     is_outermost = (is_outer_candidate and canvas_area > 0 and (hull_area_px / canvas_area) > 0.4)
 
     details = {
@@ -293,7 +304,8 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
         "ink_ratio": ink_ratio,
         "aspect_ratio": aspect_ratio,
         "is_hollow": is_hollow,
-        "is_outermost": is_outermost
+        "is_outermost": is_outermost,
+        "filled_thickness_mm": filled_thickness_mm
     }
 
     if thickness_mm < MIN_PHYSICAL_STITCH_MM:
@@ -302,15 +314,11 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
             return "noise", details
 
     if thickness_mm <= threshold_mm:
-        # --- BẢN FIX CHỐT HẠ V2: Trị dứt điểm "Nền đục lỗ" nhưng tha cho Text ---
-        num_holes = len(shape.holes)
-        
-        # Nếu có >= 4 lỗ VÀ hình khối khá đặc (solidity > 0.40) -> Chắc chắn là nền
-        # Chữ dính liền (text) tuy nhiều lỗ nhưng nét mảnh nên solidity rất thấp (< 0.40)
-        if num_holes >= 4 and solidity > 0.40:
+        # Bắt mảng nền bị đục nhiều lỗ bằng kết quả sau khi Lấp Lỗ
+        if num_holes >= 4 and filled_thickness_mm > threshold_mm and solidity > 0.40:
             label = "fill"
         else:
-            # Bẫy 2: Nền giả viền mảng bự (như cũ)
+            # Bẫy 2: Nền giả viền mảng bự
             dynamic_ink_gate = 0.35 if is_hollow else 0.60
             if ink_ratio > dynamic_ink_gate and solidity > 0.45:
                 label = "fill"
@@ -640,11 +648,7 @@ def classify_multicolor_image(image_path: str,
         print(f">> [Auto-Size] Logo Real Width = {logo_real_w_mm:.2f}mm | Threshold = {dynamic_threshold_mm:.2f}mm")
 
     # TOI UU: cat ve dung vung bounding-box chua noi dung (+ pad an toan)
-    # TRUOC KHI lam toan bo cac buoc con lai (quantize mau, loc theo tung
-    # mau, classify_binary_mask, context refinement...). normalize_to_canvas
-    # thuong "letterbox" anh vao giua canvas lon co dinh (4200x4800) - neu
-    # logo khong vuong ty le voi canvas nay, phan vien trong quanh no co the
-    # chiem toi vai chuc % dien tich canvas ma khong mang thong tin gi.
+    # TRUOC KHI lam toan bo cac buoc con lai
     pad = 4
     y0 = max(0, int(ys.min()) - pad); y1 = min(h_full, int(ys.max()) + 1 + pad)
     x0 = max(0, int(xs.min()) - pad); x1 = min(w_full, int(xs.max()) + 1 + pad)
@@ -657,13 +661,6 @@ def classify_multicolor_image(image_path: str,
     canvas_shape = (h, w)
     label_mask = np.zeros((h, w), dtype=np.uint8)
 
-    # QUAN TRONG: physical_width_mm mo ta be rong CUA CA CANVAS GOC
-    # (w_full), khong phai be rong vung vua crop. classify_binary_mask ben
-    # duoi tu tinh pixel_to_mm = physical_width_mm / w(mask-duoc-truyen) -
-    # neu truyen thang physical_width_mm goc trong khi mask da nho hon do
-    # crop, ty le mm/pixel se bi tinh SAI. Quy doi physical_width_mm ve
-    # "tuong duong" voi be rong vung crop de pixel_to_mm tinh ra dung y het
-    # nhu khi chua crop.
     physical_width_mm_crop = physical_width_mm * (w / float(w_full))
 
     total_fg_area_px = float(np.count_nonzero(foreground_mask))
@@ -718,8 +715,6 @@ def classify_multicolor_image(image_path: str,
 
     label_mask = fill_unlabeled_gaps(label_mask, foreground_mask)
 
-    # Dan ket qua tu vung crop tro lai canvas day du. Phan ngoai vung crop
-    # chac chan la background hoan toan nen giu nguyen gia tri 0 la dung.
     label_mask_full[y0:y1, x0:x1] = label_mask
     working_img_full[y0:y1, x0:x1] = working_img
 
@@ -780,7 +775,6 @@ def classify_svg(svg_path: str,
     small_canvas_shape = (small_h, small_w)
     pixel_to_mm_small = canvas_physical_mm / max(float(small_w), 1.0)
     
-    # Tính tổng lượng mực trên canvas nhỏ để làm chuẩn cho ink_ratio
     small_total_fg = cv2.resize(total_fg.astype(np.uint8), (small_w, small_h), interpolation=cv2.INTER_NEAREST)
     small_total_fg_area_px = float(np.count_nonzero(small_total_fg))
 
@@ -789,10 +783,6 @@ def classify_svg(svg_path: str,
     shape_path_idx: List[int] = []
     global_id_counter = 0
 
-    # ---------------------------------------------------------------
-    # SPEEDUP PATCH: set display="none" cho TOAN BO path CHI 1 LAN duy
-    # nhat truoc vong lap
-    # ---------------------------------------------------------------
     _saved_displays = {el: el.attrib.get("display") for el in path_elems}
     for el in path_elems:
         el.set("display", "none")
@@ -996,4 +986,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
