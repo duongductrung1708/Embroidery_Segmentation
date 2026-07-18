@@ -180,15 +180,25 @@ def _measure_and_classify_shape(contour, holes, canvas_shape, pixel_to_mm, dynam
         label = "FILL"
         reason = f"BORDERLINE (ratio={ratio:.2f} trong [{lo:.2f},{hi:.2f}]) -> mac dinh FILL"
     elif ratio <= 1.0:
-        if ink_ratio > ink_ratio_gate and solidity > solidity_gate:
+        # --- BẢN FIX CHỐT HẠ V2: Phân biệt Nền đục lỗ và Text dính liền ---
+        num_holes = len(holes)
+        
+        if num_holes >= 4 and solidity > 0.40:
             label = "FILL"
-            reason = f"duoi nguong nhung ink_ratio={ink_ratio:.2f}>{ink_ratio_gate} & solidity={solidity:.2f}>{solidity_gate} -> ep FILL (nen gia vien)"
+            reason = f"chua nhieu lo (holes={num_holes}) va dac (sol={solidity:.2f}>0.40) -> ep FILL (nen chua chu)"
         else:
-            label = "SATIN"
-            reason = f"{thickness_mm:.3f} <= {dynamic_threshold_mm:.3f} mm"
+            dynamic_ink_gate = ink_ratio_gate if is_hollow else 0.60
+            
+            if ink_ratio > dynamic_ink_gate and solidity > solidity_gate:
+                label = "FILL"
+                reason = f"duoi nguong nhung ink_ratio={ink_ratio:.2f}>{dynamic_ink_gate} (hollow={is_hollow}) & solidity={solidity:.2f}>{solidity_gate} -> ep FILL"
+            else:
+                label = "SATIN"
+                reason = f"{thickness_mm:.3f} <= {dynamic_threshold_mm:.3f} mm"
     else:
         label = "FILL"
         reason = f"{thickness_mm:.3f} > {dynamic_threshold_mm:.3f} mm"
+
 
     is_mixed_width = False
     mixed_split_masks = None
@@ -221,25 +231,6 @@ def debug_shape_thickness_fixed(image_path, physical_width_mm=80.0, threshold_ra
                                  color_tolerance=25):
     """
     BAN v5 - TONG QUAT HOA CHO ANH PREVIEW NHIEU MAU / NHIEU VUNG
-    ================================================================
-    [SUA LOI MOI] Ban truoc dung grayscale+Otsu de tach foreground/
-    background, nen voi anh PREVIEW DA PHAN LOAI (2 mau: vang=FILL, hong=
-    SATIN), Otsu de bi "lua" boi do sang khac nhau giua 2 mau muc -> mot
-    trong hai mau (thuong la SATIN/hong, do grayscale thap gan voi nen
-    den) bi tinh nham la KHONG CO MUC, lam bien mat toan bo vung do khoi
-    phan tich (vd dau "+" mau hong trong logo COFFEE). Xac minh thuc te:
-    Otsu chon threshold=105 = DUNG BANG grayscale cua mau hong (255,0,255).
-
-    SUA: doc mau BGR TRUC TIEP (khong qua grayscale) de tach FILL/SATIN
-    thanh 2 mask RIENG BIET tu dau (ham load_image_masks). Voi anh preview
-    chuan cua production (vang/hong), ca 2 vung deu duoc phan tich day du
-    va DOC LAP voi nhau - dung 1 duong bien giua 2 vung khac mau se KHONG
-    bi gop nham thanh 1 shape (giong nhu production xu ly tung <path> rieng).
-    Voi anh nguon 1-mau thong thuong (vd file test luc dau), tu dong
-    fallback ve grayscale+Otsu nhu cu - khong pha vo cach dung cu.
-
-    Ap dung day du cac ban sua truoc: median-qua-SKELETON, minAreaRect cho
-    shape gan loi, hysteresis band, va phat hien+tach shape "hon hop do day".
     """
     mode, fill_mask_full, satin_mask_full, total_fg = load_image_masks(image_path, color_tolerance)
     h, w = total_fg.shape
@@ -278,10 +269,6 @@ def debug_shape_thickness_fixed(image_path, physical_width_mm=80.0, threshold_ra
     print(f"=== LOG KET QUA DO DAC THUC TE (MM) ===")
     valid_shape_count = 0
 
-    # [MOI] Voi anh 'classified': quet contour RIENG cho tung mau (FILL va
-    # SATIN), khong gop chung thanh 1 mask "co mau gi cung duoc" - vi 2
-    # vung khac mau ke sat nhau trong production la 2 <path> khac nhau,
-    # khong nen bi coi la 1 shape lien thong.
     color_groups = [("FILL", fill_mask_full), ("SATIN", satin_mask_full)] if mode == "classified" \
         else [("?", total_fg)]
 
@@ -393,4 +380,4 @@ def debug_shape_thickness_fixed(image_path, physical_width_mm=80.0, threshold_ra
 
 # Test thu
 if __name__ == "__main__":
-    debug_shape_thickness_fixed('data/opencv_test/predictions/96_pred.png', physical_width_mm=80.0, threshold_ratio=6.0)
+    debug_shape_thickness_fixed('data/opencv_test/predictions/test_pred.png', physical_width_mm=80.0, threshold_ratio=6.0)

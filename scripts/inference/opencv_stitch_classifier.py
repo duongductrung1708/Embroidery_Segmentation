@@ -18,42 +18,17 @@ distance) nhưng do hình dạng có đầu vát/nhọn (parallelogram nghiêng)
 tính "median qua skeleton" lại ra 3 kết quả khác hẳn nhau: 6.86 / 9.96 /
 14.32mm.
 
-Nguyên nhân: đoạn "vát" ở 2 đầu shape (nơi bề rộng ramp từ 0 lên full) có
-ĐỘ DÀI TUYỆT ĐỐI gần như cố định (phụ thuộc góc vát, không phụ thuộc chiều
-dài shape), nhưng chiếm TỶ LỆ % rất khác nhau trên tổng chiều dài khung
-xương (skeleton) tùy shape ngắn hay dài. Shape càng NGẮN thì đoạn vát chiếm
-% skeleton càng lớn -> median (thống kê theo % số điểm) bị "kéo tụt" xuống
-gần giá trị ở đầu vát thay vì giá trị bề rộng thật ở phần thân. Cùng 1 bề
-rộng thật, các cột dài/ngắn khác nhau bị đo ra thickness khác nhau hoàn
-toàn - hoàn toàn sai với ý nghĩa vật lý (bề rộng không phụ thuộc chiều
-dài).
-
 SỬA: với shape gần lồi (solidity cao) và KHÔNG có lỗ, dùng bề rộng cạnh
 ngắn của `cv2.minAreaRect` (hình chữ nhật bao nhỏ nhất) làm thước đo bề
 rộng - đây là phép đo hình học thuần túy, BẤT BIẾN hoàn toàn theo chiều dài
-shape. Chỉ tin giá trị này khi nó "hợp lý" (nằm trong khoảng
-[0.5x, 1.2x] so với max_thickness đo bằng distance-transform) để tránh
-dùng nhầm cho các shape dạng L/T/chữ thập... có solidity cao "giả tạo".
-Nếu không hội đủ điều kiện (shape lõm/có lỗ, ví dụ chữ cái, nét cong, vòng
-tròn có lỗ), vẫn dùng skeleton-median như cũ vì minAreaRect lúc đó không
-còn đại diện đúng cho bề rộng nét.
-===============================================================================
+shape.
 
 ===============================================================================
 TOI UU TOC DO (SPEEDUP PATCH v2 - per-path rasterization):
 - _render_single_path_mask TRUOC DAY copy dict attrib cua TAT CA path_elems
-  o MOI LAN GOI ham (saved_attribs = [dict(el.attrib) for el in path_elems]),
-  nghia la voi N path thi tong chi phi copy la O(N^2) - day la nguyen nhan
-  chinh khien file SVG cang nhieu path (hinh phuc tap) thi cang cham mot
-  cach bat thuong (khong tuyen tinh).
+  o MOI LAN GOI ham.
 - FIX: gio chi set display="none" cho TAT CA path DUY NHAT 1 LAN truoc vong
-  lap (trong classify_svg), sau do moi vong lap _render_single_path_mask
-  CHI luu/khoi phuc attribute cua DUNG 1 phan tu dang xu ly -> O(1) copy
-  moi vong thay vi O(N). Tong chi phi giam tu O(N^2) xuong O(N).
-- Ham _render_single_path_mask cu (nhan ca list path_elems + path_index)
-  duoc GIU LAI (deprecated) de tuong thich nguoc voi code ben ngoai co the
-  dang goi truc tiep no; ham moi _render_single_path_mask_fast la ham
-  chinh duoc dung ben trong classify_svg.
+  lap.
 ===============================================================================
 """
 
@@ -99,8 +74,7 @@ TOUCH_DILATION_PHYSICAL_MM = 0.5
 # lam thuoc do be rong) khi solidity >= nguong nay.
 SOLIDITY_TRUST_MINRECT = 0.92
 # FIX (skeleton-median): chi chap nhan minAreaRect short-side khi no nam
-# trong khoang [MINRECT_SANITY_LOW, MINRECT_SANITY_HIGH] x max_thickness -
-# tranh dung nham cho shape dang L/T/chu thap co solidity cao "gia tao".
+# trong khoang [MINRECT_SANITY_LOW, MINRECT_SANITY_HIGH] x max_thickness
 MINRECT_SANITY_LOW = 0.5
 MINRECT_SANITY_HIGH = 1.2
 
@@ -242,13 +216,6 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
     is_hollow = len(shape.holes) > 0
     thickness_skeleton_mm, thickness_max_mm = thickness_mm_from_mask(mask, pixel_to_mm)
 
-    # FIX (skeleton-median khong bat bien theo chieu dai shape): voi shape
-    # GAN LOI (solidity cao) va KHONG CO LO, minAreaRect short-side la
-    # thuoc do be rong CHINH XAC va BAT BIEN theo chieu dai - uu tien dung
-    # no thay vi skeleton-median (von bi lech boi ty le % dai cua doan vat
-    # dau shape so voi tong chieu dai skeleton). Chi tin minAreaRect khi no
-    # "hop ly" so voi max_thickness (tranh nham voi shape L/T/chu thap co
-    # solidity cao gia tao do dac diem hinh hoc rieng).
     minrect_short_mm = short_side * pixel_to_mm
     thickness_source = "skeleton-median"
     thickness_mm = thickness_skeleton_mm
@@ -278,12 +245,20 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
             return "noise", details
 
     if thickness_mm <= threshold_mm:
-        # Nếu chiếm > 35% tổng lượng mực toàn logo VÀ khối lượng đặc khá cao (> 0.45)
-        # Rất có khả năng đây là Nền Background lớn bị đục lỗ đánh lừa thuật toán. Ép về FILL!
-        if ink_ratio > 0.35 and solidity > 0.45:
+        # --- BẢN FIX CHỐT HẠ V2: Trị dứt điểm "Nền đục lỗ" nhưng tha cho Text ---
+        num_holes = len(shape.holes)
+        
+        # Nếu có >= 4 lỗ VÀ hình khối khá đặc (solidity > 0.40) -> Chắc chắn là nền
+        # Chữ dính liền (text) tuy nhiều lỗ nhưng nét mảnh nên solidity rất thấp (< 0.40)
+        if num_holes >= 4 and solidity > 0.40:
             label = "fill"
         else:
-            label = "satin"
+            # Bẫy 2: Nền giả viền mảng bự (như cũ)
+            dynamic_ink_gate = 0.35 if is_hollow else 0.60
+            if ink_ratio > dynamic_ink_gate and solidity > 0.45:
+                label = "fill"
+            else:
+                label = "satin"
     else:
         label = "fill"
 
@@ -438,13 +413,7 @@ def get_declared_label(path_elem: ET.Element) -> Optional[str]:
 
 def _render_single_path_mask(path_elems: List[ET.Element], path_index: int,
                               canvas_w: int, canvas_h: int, root: ET.Element) -> np.ndarray:
-    """[DEPRECATED - GIU LAI DE TUONG THICH NGUOC]
-    Ham nay copy attrib cua TAT CA path_elems moi lan goi -> O(N) copy/vong,
-    O(N^2) tong cong neu goi N lan trong 1 vong lap (nhu classify_svg truoc
-    day tung lam). Dung _render_single_path_mask_fast() ben trong vong lap
-    hieu suat cao; ham nay chi con de code ben ngoai goi truc tiep (neu co)
-    van chay dung, khong bi vo API.
-    """
+    """[DEPRECATED - GIU LAI DE TUONG THICH NGUOC]"""
     if cairosvg is None:
         raise ImportError("Can cai dat 'cairosvg' de rasterize SVG.")
 
@@ -475,15 +444,7 @@ def _render_single_path_mask(path_elems: List[ET.Element], path_index: int,
 
 def _render_single_path_mask_fast(path_elem: ET.Element, root: ET.Element,
                                    canvas_w: int, canvas_h: int) -> np.ndarray:
-    """Ban toi uu cua _render_single_path_mask.
-
-    Gia dinh: TAT CA cac path khac trong `path_elems` DA duoc set
-    display="none" TU TRUOC (1 lan duy nhat, ngoai vong lap - xem
-    classify_svg). Ham nay chi can luu/khoi phuc attribute cua DUNG 1
-    phan tu `path_elem` dang duoc "bat sang" de rasterize - O(1) copy moi
-    vong thay vi O(N), giup tong chi phi ca vong lap giam tu O(N^2) xuong
-    O(N). Day la nguyen nhan chinh gay cham voi SVG nhieu path.
-    """
+    """Ban toi uu cua _render_single_path_mask."""
     if cairosvg is None:
         raise ImportError("Can cai dat 'cairosvg' de rasterize SVG.")
 
@@ -712,10 +673,7 @@ def classify_svg(svg_path: str,
 
     # ---------------------------------------------------------------
     # SPEEDUP PATCH: set display="none" cho TOAN BO path CHI 1 LAN duy
-    # nhat truoc vong lap (thay vi moi vong lap phai copy+set lai attrib
-    # cua het N path nhu ham _render_single_path_mask cu). Ben trong vong
-    # lap, _render_single_path_mask_fast chi dong/mo display cua DUNG 1
-    # phan tu dang xu ly. Giam tong chi phi tu O(N^2) xuong O(N).
+    # nhat truoc vong lap
     # ---------------------------------------------------------------
     _saved_displays = {el: el.attrib.get("display") for el in path_elems}
     for el in path_elems:
@@ -756,9 +714,6 @@ def classify_svg(svg_path: str,
                 global_records.append(_GlobalShapeRecord(shape, shape_mask_small, area_px))
                 shape_path_idx.append(idx)
     finally:
-        # Khoi phuc display goc cho tat ca path (dung nguyen trang thai
-        # ban dau, phong khi mot so path von da co display khac ngoai y
-        # muon truoc khi ham nay chay).
         for el, disp in _saved_displays.items():
             if disp is None:
                 el.attrib.pop("display", None)
