@@ -167,8 +167,41 @@ def shape_to_mask(shape: Shape, canvas_shape: Tuple[int, int]) -> np.ndarray:
     return mask
 
 
-def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float) -> Tuple[float, float]:
-    if mask.sum() == 0: return 0.0, 0.0
+def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float,
+                            contour: Optional[np.ndarray] = None,
+                            need_skeleton: bool = True) -> Tuple[float, float]:
+    """
+    Tra ve (median_thickness_mm, max_thickness_mm) - CUNG Y NGHIA nhu ban
+    goc, chi toi uu CACH TINH:
+
+    - Neu co `contour`: dung cv2.boundingRect(contour) (RE - chi doc cac
+      diem bien, khong quet ca mask) de cat ve dung vung bounding-box cua
+      shape (+2px dem an toan) truoc khi lam distanceTransform/skeletonize.
+      Ket qua o vung ben trong shape GIONG HET so voi lam tren ca canvas
+      (bounding box da bao het toan bo shape), chi nhanh hon rat nhieu khi
+      shape nho hon nhieu so voi canvas chua no.
+    - Neu `need_skeleton=False`: bo qua hoan toan buoc skeletonize - buoc
+      CHAM NHAT trong ham nay (thuong chiem >90% thoi gian chay). Chi goi
+      voi need_skeleton=False khi noi goi (xem _classify_shape) da xac
+      dinh se dung minAreaRect thay the va khong can gia tri median nay.
+    """
+    if mask.sum() == 0:
+        return 0.0, 0.0
+
+    if contour is not None:
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        pad = 2
+        y0 = max(0, by - pad); x0 = max(0, bx - pad)
+        y1 = min(mask.shape[0], by + bh + pad); x1 = min(mask.shape[1], bx + bw + pad)
+        mask = mask[y0:y1, x0:x1]
+    else:
+        ys, xs = np.where(mask)
+        if len(ys) == 0:
+            return 0.0, 0.0
+        pad = 2
+        y0 = max(0, ys.min() - pad); x0 = max(0, xs.min() - pad)
+        y1 = min(mask.shape[0], ys.max() + 1 + pad); x1 = min(mask.shape[1], xs.max() + 1 + pad)
+        mask = mask[y0:y1, x0:x1]
 
     h, w = mask.shape
     MAX_EVAL_SIZE = 1500
@@ -184,7 +217,10 @@ def thickness_mm_from_mask(mask: np.ndarray, pixel_to_mm: float) -> Tuple[float,
     dist = cv2.distanceTransform(eval_mask.astype(np.uint8), cv2.DIST_L2, 5)
     actual_pixel_to_mm = pixel_to_mm / scale_factor
     max_thickness_mm = (np.max(dist) * 2.0) * actual_pixel_to_mm
-    
+
+    if not need_skeleton or skeletonize is None:
+        return max_thickness_mm, max_thickness_mm
+
     median_thickness_mm = max_thickness_mm
     if skeletonize is not None:
         try:
@@ -214,15 +250,36 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
     aspect_ratio = long_side / short_side if short_side > 0 else 100.0
 
     is_hollow = len(shape.holes) > 0
-    thickness_skeleton_mm, thickness_max_mm = thickness_mm_from_mask(mask, pixel_to_mm)
-
     minrect_short_mm = short_side * pixel_to_mm
-    thickness_source = "skeleton-median"
-    thickness_mm = thickness_skeleton_mm
-    if solidity >= SOLIDITY_TRUST_MINRECT and not is_hollow:
-        if MINRECT_SANITY_LOW * thickness_max_mm <= minrect_short_mm <= MINRECT_SANITY_HIGH * thickness_max_mm:
-            thickness_mm = minrect_short_mm
-            thickness_source = "minAreaRect"
+
+    # TOI UU: tinh max_thickness TRUOC (khong skeletonize - buoc cham
+    # nhat) de kiem tra dieu kien minAreaRect. Voi da so shape gan-loi /
+    # khong-lo (cot satin, chu khoi...), dieu kien nay se THOA MAN va ham
+    # se KHONG BAO GIO can goi toi skeletonize nua.
+    _, thickness_max_mm = thickness_mm_from_mask(
+        mask, pixel_to_mm, contour=shape.contour, need_skeleton=False
+    )
+
+    use_minrect = (
+        solidity >= SOLIDITY_TRUST_MINRECT and not is_hollow and
+        MINRECT_SANITY_LOW * thickness_max_mm <= minrect_short_mm <= MINRECT_SANITY_HIGH * thickness_max_mm
+    )
+
+    if use_minrect:
+        thickness_mm = minrect_short_mm
+        thickness_source = "minAreaRect"
+        # Khong tinh skeleton that su (tiet kiem thoi gian) - dung tam
+        # max_thickness de hien thi verbose cho nhat quan, khong anh huong
+        # ket qua vi thickness_mm da chon minAreaRect o tren.
+        thickness_skeleton_mm = thickness_max_mm
+    else:
+        # Fallback (shape lom / co lo / minAreaRect khong hop le): moi can
+        # toi skeleton-median - cham hon nhung chi chay khi thuc su can.
+        thickness_skeleton_mm, thickness_max_mm = thickness_mm_from_mask(
+            mask, pixel_to_mm, contour=shape.contour, need_skeleton=True
+        )
+        thickness_mm = thickness_skeleton_mm
+        thickness_source = "skeleton-median"
 
     is_outermost = (is_outer_candidate and canvas_area > 0 and (hull_area_px / canvas_area) > 0.4)
 
@@ -328,6 +385,10 @@ class _GlobalShapeRecord:
         self.shape = shape
         self.mask = mask
         self.area_px = area_px
+        # TOI UU: cache bounding box (x, y, w, h) tu contour (RE, khong
+        # quet mask) de loc nhanh cac cap shape KHONG THE giao nhau truoc
+        # khi lam phep AND tren toan canvas trong refine_labels_by_context.
+        self.bbox = cv2.boundingRect(shape.contour)
 
 
 def _build_interior_mask(shape: Shape, shape_mask: np.ndarray,
@@ -344,6 +405,19 @@ def _dilate_mask(mask: np.ndarray, dilation_px: int) -> np.ndarray:
     if dilation_px <= 0: return mask
     kernel = np.ones((dilation_px * 2 + 1, dilation_px * 2 + 1), np.uint8)
     return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1)
+
+
+def _bbox_may_overlap(b1: Tuple[int, int, int, int], dilate1: int,
+                       b2: Tuple[int, int, int, int]) -> bool:
+    """TOI UU: kiem tra RE (chi so sanh 4 con so, khong dung mang) xem 2
+    bounding-box CO THE giao nhau khong (b1 duoc gian them `dilate1` px moi
+    chieu de mo phong _dilate_mask ben duoi). Tra ve False nghia la CHAC
+    CHAN 2 mask khong giao nhau -> bo qua duoc phep AND tren ca canvas (dat
+    hon phep so sanh nay hang tram lan)."""
+    x1, y1, w1, h1 = b1
+    x1 -= dilate1; y1 -= dilate1; w1 += 2 * dilate1; h1 += 2 * dilate1
+    x2, y2, w2, h2 = b2
+    return not (x1 + w1 < x2 or x2 + w2 < x1 or y1 + h1 < y2 or y2 + h2 < y1)
 
 
 def refine_labels_by_context(records: List[_GlobalShapeRecord],
@@ -372,6 +446,12 @@ def refine_labels_by_context(records: List[_GlobalShapeRecord],
 
         for other in records:
             if other is outline or other.shape.label != "satin" or other.area_px == 0: continue
+
+            # TOI UU: loc so bo bang bbox truoc khi dung toi AND tren ca
+            # canvas. Dung ban bbox da gian (theo touch_dilation_px) lam
+            # dieu kien "superset" an toan cho ca 2 phep kiem tra ben duoi.
+            if not _bbox_may_overlap(outline.bbox, touch_dilation_px, other.bbox):
+                continue
 
             overlap_interior = int(np.count_nonzero(interior_mask & other.mask))
             interior_ratio = overlap_interior / other.area_px
@@ -536,25 +616,55 @@ def classify_multicolor_image(image_path: str,
     if img is None: raise FileNotFoundError(f"Khong doc duoc anh: {image_path}")
 
     img = normalize_to_canvas(img, target_w=4200, target_h=4800)
-    img_bgr = img[:, :, :3]
-    alpha = img[:, :, 3]
-    is_background = alpha < alpha_threshold
-    foreground_mask = ~is_background
+    img_bgr_full = img[:, :, :3]
+    alpha_full = img[:, :, 3]
+    is_background_full = alpha_full < alpha_threshold
+    foreground_mask_full = ~is_background_full
+
+    h_full, w_full = img_bgr_full.shape[:2]
+    label_mask_full = np.zeros((h_full, w_full), dtype=np.uint8)
+    working_img_full = np.zeros((h_full, w_full, 3), dtype=np.uint8)
+
+    ys, xs = np.where(foreground_mask_full)
+    if len(xs) == 0:
+        # Khong co noi dung gi tren canvas -> tra ve som
+        if verbose:
+            print(">> [Auto-Size] Canvas rong, khong co gi de phan loai.")
+        return label_mask_full, working_img_full
+
+    crop_w_full = xs.max() - xs.min() + 1
+    logo_real_w_mm = physical_width_mm * (crop_w_full / w_full)
+    dynamic_threshold_mm = logo_real_w_mm / 6.0
+
+    if verbose:
+        print(f">> [Auto-Size] Logo Real Width = {logo_real_w_mm:.2f}mm | Threshold = {dynamic_threshold_mm:.2f}mm")
+
+    # TOI UU: cat ve dung vung bounding-box chua noi dung (+ pad an toan)
+    # TRUOC KHI lam toan bo cac buoc con lai (quantize mau, loc theo tung
+    # mau, classify_binary_mask, context refinement...). normalize_to_canvas
+    # thuong "letterbox" anh vao giua canvas lon co dinh (4200x4800) - neu
+    # logo khong vuong ty le voi canvas nay, phan vien trong quanh no co the
+    # chiem toi vai chuc % dien tich canvas ma khong mang thong tin gi.
+    pad = 4
+    y0 = max(0, int(ys.min()) - pad); y1 = min(h_full, int(ys.max()) + 1 + pad)
+    x0 = max(0, int(xs.min()) - pad); x1 = min(w_full, int(xs.max()) + 1 + pad)
+
+    img_bgr = img_bgr_full[y0:y1, x0:x1]
+    is_background = is_background_full[y0:y1, x0:x1]
+    foreground_mask = foreground_mask_full[y0:y1, x0:x1]
 
     h, w = img_bgr.shape[:2]
     canvas_shape = (h, w)
     label_mask = np.zeros((h, w), dtype=np.uint8)
-    
-    ys, xs = np.where(foreground_mask)
-    if len(xs) > 0:
-        crop_w = xs.max() - xs.min() + 1
-        logo_real_w_mm = physical_width_mm * (crop_w / w)
-        dynamic_threshold_mm = logo_real_w_mm / 6.0
-    else:
-        dynamic_threshold_mm = physical_width_mm / 6.0
 
-    if verbose:
-        print(f">> [Auto-Size] Logo Real Width = {logo_real_w_mm:.2f}mm | Threshold = {dynamic_threshold_mm:.2f}mm")
+    # QUAN TRONG: physical_width_mm mo ta be rong CUA CA CANVAS GOC
+    # (w_full), khong phai be rong vung vua crop. classify_binary_mask ben
+    # duoi tu tinh pixel_to_mm = physical_width_mm / w(mask-duoc-truyen) -
+    # neu truyen thang physical_width_mm goc trong khi mask da nho hon do
+    # crop, ty le mm/pixel se bi tinh SAI. Quy doi physical_width_mm ve
+    # "tuong duong" voi be rong vung crop de pixel_to_mm tinh ra dung y het
+    # nhu khi chua crop.
+    physical_width_mm_crop = physical_width_mm * (w / float(w_full))
 
     total_fg_area_px = float(np.count_nonzero(foreground_mask))
 
@@ -568,7 +678,9 @@ def classify_multicolor_image(image_path: str,
     working_img[is_background] = (0, 0, 0)
 
     pixels = working_img[foreground_mask].reshape(-1, 3)
-    if pixels.size == 0: return label_mask, working_img
+    if pixels.size == 0:
+        working_img_full[y0:y1, x0:x1] = working_img
+        return label_mask_full, working_img_full
 
     unique_colors = np.unique(pixels, axis=0)
 
@@ -586,7 +698,7 @@ def classify_multicolor_image(image_path: str,
         if n_pixels < min_region_pixels: continue
 
         shapes, sub_label_mask = classify_binary_mask(
-            color_mask, physical_width_mm=physical_width_mm,
+            color_mask, physical_width_mm=physical_width_mm_crop,
             threshold_mm=dynamic_threshold_mm,
             total_fg_area_px=total_fg_area_px, verbose=verbose,
         )
@@ -601,11 +713,17 @@ def classify_multicolor_image(image_path: str,
             global_records.append(_GlobalShapeRecord(shape, shape_mask, area_px))
 
     if enable_context_refinement and global_records:
-        pixel_to_mm_full = physical_width_mm / max(float(w), 1.0)
+        pixel_to_mm_full = physical_width_mm / max(float(w_full), 1.0)
         label_mask = refine_labels_by_context(global_records, label_mask, canvas_shape, pixel_to_mm=pixel_to_mm_full, verbose=verbose)
 
     label_mask = fill_unlabeled_gaps(label_mask, foreground_mask)
-    return label_mask, working_img
+
+    # Dan ket qua tu vung crop tro lai canvas day du. Phan ngoai vung crop
+    # chac chan la background hoan toan nen giu nguyen gia tri 0 la dung.
+    label_mask_full[y0:y1, x0:x1] = label_mask
+    working_img_full[y0:y1, x0:x1] = working_img
+
+    return label_mask_full, working_img_full
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +996,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

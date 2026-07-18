@@ -8,7 +8,7 @@ Tài liệu này liệt kê các yêu cầu bắt buộc và khuyến nghị cho
 
 ---
 
-## 1. Kích thước vật lý phải khai báo đúng (bắt buộc)
+## 1. Kích thước vật lý phải khai báo đúng
 
 Ngưỡng phân biệt satin/fill được tính **động** dựa trên bề rộng thật (mm)
 của logo:
@@ -47,6 +47,7 @@ hoặc `viewBox` đúng tỉ lệ thật của thiết kế.
   được** giả lập lỗ bằng cách vẽ đè một path màu nền/trắng lên trên. Hệ
   thống tách hình dựa trên contour hierarchy thật của path — nếu lỗ là giả
   (chỉ là 2 path chồng lên nhau), kết quả phân loại sẽ sai.
+
 - **Không để sót path rác/artefact** (các mảnh vụn cực nhỏ do phần mềm
   vector hoá tự sinh ra). Những path quá nhỏ (dưới ngưỡng diện tích
   ~0.2mm² và bề dày dưới ~0.4mm) sẽ bị coi là nhiễu và tự động loại bỏ,
@@ -59,10 +60,20 @@ hoặc `viewBox` đúng tỉ lệ thật của thiết kế.
 - Không nên áp dụng phép biến đổi (transform) phức tạp/lồng nhau nhiều lớp
   gây méo tỉ lệ thật của path so với kích thước đã khai báo ở mục 1 — bề
   dày đo được phải phản ánh đúng bề dày thật ngoài đời của nét.
+- **Tránh dùng màu tô dạng gradient** (`linearGradient`, `radialGradient`,
+  `fill="url(#...)"`) cho path — nên dùng **màu đặc, không trong suốt**
+  (`fill="#RRGGBB"`, `fill-opacity="1"`). Gradient có 2 vấn đề: (1) không
+  còn là một mã màu duy nhất, nên phá vỡ quy ước gán nhãn theo màu ở mục 5
+  (hệ thống không nhận ra `#ff0000`/`#0000ff` khi màu là một chuỗi tham
+  chiếu gradient); (2) nếu gradient có các điểm dừng trong suốt/mờ dần,
+  vùng mờ đó có thể bị tính sai là "không có mực" ở bước xác định biên
+  logo, làm lệch kích thước thật dùng để tính ngưỡng phân loại cho toàn bộ
+  file. Ngoài ra, chỉ thêu được màu chỉ đặc — gradient vốn không có ý
+  nghĩa vật lý khi lên khung thêu.
 
 ---
 
-## 3. Tránh path có bề dày nằm sát ngưỡng phân loại (vùng "mơ hồ")
+## 3. Tránh path có bề dày nằm sát ngưỡng phân loại
 
 Vì hệ thống chỉ dựa vào **một con số ngưỡng duy nhất**
 (`threshold_mm = bề_rộng_logo / 6`) để quyết định satin hay fill, những
@@ -73,8 +84,7 @@ path có bề dày nằm **quá sát ngưỡng này** là nguồn gây sai nhi�
 - Một mảng fill nhưng vẽ hơi mỏng (gần chạm ngưỡng) có thể bị nhận nhầm
   thành satin.
 
-Đây không phải lỗi có thể tự phát hiện được từ phía thuật toán — bản thân
-hình học "nhìn mơ hồ" thì máy cũng mơ hồ như người. Vì vậy khi thiết kế/
+Vì vậy khi thiết kế/
 xuất SVG, cần:
 
 - **Chủ đích hoá bề dày của từng path**, tránh vẽ các nét/mảng có bề dày
@@ -104,7 +114,49 @@ tiết cỡ trung, gần bằng đúng 1/6 bề rộng logo.**
 
 ---
 
-## 4. (Tùy chọn) Gán nhãn có sẵn cho path
+## 4. Cẩn trọng khi các path satin tiếp xúc hoặc chồng lên nhau
+
+Hai path (dù cùng là satin, hay khác loại) **chạm biên hoặc chồng mép lên
+nhau** cũng là một nguồn gây sai khác, tách biệt với vấn đề bề dày ở mục 3:
+
+- **Nếu hai nét vốn là một khối satin liên tục nhưng bị tách thành hai
+  `<path>` riêng, đặt sát/chồng mép nhau** để "trông như dính liền": hệ
+  thống xử lý từng `<path>` độc lập, nên mỗi nét vẫn được đo bề dày *riêng
+  lẻ theo đúng path của nó*, chứ không tự động gộp lại thành một khối để
+  đo chung. Nếu ý đồ thiết kế là một satin liền mạch, hãy vẽ **gộp thành
+  một `<path>` duy nhất** — tách rời thành nhiều path sát nhau chỉ nên
+  dùng khi các phần đó thực sự là các đối tượng độc lập.
+- **Nếu một path satin nằm áp sát/chạm biên vào bên trong một path satin
+  khác có lỗ rỗng** (dạng viền/outline), hệ thống có một bước tinh chỉnh
+  theo ngữ cảnh: nếu path bên trong bị bao phủ ≥ 50% diện tích bởi phần
+  rỗng của path viền đó, **và** có chạm biên viền, path bên trong sẽ **tự
+  động bị ép thành fill** (cơ chế này vốn để xử lý đúng phần thân bên
+  trong các chữ cái như "e", "a", "o"). Nếu hai nét satin của bạn tiếp xúc
+  nhau nhưng **không** có quan hệ dạng "một cái nằm trong lỗ của cái kia",
+  quy tắc này sẽ không áp dụng — nhưng nếu vô tình rơi đúng vào tình huống
+  đó (một satin nhỏ lọt gần hết vào phần rỗng của một satin viền lớn và
+  có điểm chạm), nó **sẽ** bị đổi thành fill dù ý đồ ban đầu là satin.
+  Nếu không muốn bị ép nhãn theo ngữ cảnh này, tránh để một path satin nằm
+  lọt gần hết bên trong lỗ của một path satin khác, hoặc tách khoảng cách
+  rõ ràng thay vì để chạm biên.
+- **Hai path chồng mép lên nhau (overlap thật sự, không chỉ chạm biên)**
+  dù không liên quan đến quy tắc trên vẫn gây rủi ro: ở bước vẽ nhãn màu
+  cuối cùng, các path được vẽ chồng lên nhau theo đúng thứ tự xuất hiện
+  trong file SVG — path nào nằm sau trong file sẽ **đè màu/nhãn lên** phần
+  pixel chồng lấn của path nằm trước. Nếu hai path vô tình overlap ở biên
+  (thường do xuất file từ phần mềm vector không khít tuyệt đối), phần
+  biên đó sẽ hiển thị nhãn của path vẽ sau, có thể không đúng ý đồ thiết
+  kế ban đầu.
+
+**Khuyến nghị:** với các nét/mảng thực sự là những đối tượng tách biệt,
+nên để một khoảng hở nhỏ rõ ràng giữa chúng thay vì để chạm khít biên hay
+chồng mép; với các nét vốn là một khối liền mạch, nên gộp thành một
+`<path>` duy nhất ngay từ khâu thiết kế thay vì tách rời rồi ghép lại bằng
+mắt thường.
+
+---
+
+## 5. (Tùy chọn) Gán nhãn có sẵn cho path
 
 Nếu file SVG đã có sẵn nhãn (ví dụ do người thiết kế gắn tay), hệ thống có
 thể ưu tiên đọc trực tiếp thay vì tự suy luận hình học, theo thứ tự:
@@ -115,15 +167,17 @@ thể ưu tiên đọc trực tiếp thay vì tự suy luận hình học, theo 
 2. Thuộc tính `data-label`, `data-stitch`, `data-stitch-type`, `class`,
    hoặc `id` chứa chuỗi `"satin"` hoặc `"fill"`.
 3. Mã màu trong `style`: `#ff0000` → satin; `#0000ff`/`#00ff00` → fill.
+   (Chỉ nhận diện được màu đặc dạng mã hex — path dùng gradient sẽ không
+   khớp được với quy ước này, xem lưu ý ở mục 2.)
 4. Nếu path không có nhãn nào ở trên, hệ thống sẽ tự phân loại hoàn toàn
-   dựa trên hình học (bề dày, độ đặc, tỉ lệ mực) như mô tả ở mục 5.
+   dựa trên hình học (bề dày, độ đặc, tỉ lệ mực) như mô tả ở mục 6.
 
 Đây không phải yêu cầu bắt buộc — file SVG không có nhãn vẫn được xử lý
 bình thường bằng thuật toán hình học.
 
 ---
 
-## 5. Vì sao thuật toán ra quyết định như vậy (tóm tắt)
+## 6. Vì sao thuật toán ra quyết định như vậy
 
 Với mỗi path, hệ thống đo:
 
@@ -151,7 +205,7 @@ kế), **SVG càng sạch, càng đúng tỉ lệ thật thì kết quả càng 
 
 ---
 
-## 6. Checklist nhanh trước khi upload SVG
+## 7. Checklist nhanh trước khi upload SVG
 
 - [ ] Có `width` (kèm đơn vị thật) hoặc `viewBox` đúng tỉ lệ thật của
       thiết kế.
@@ -160,15 +214,22 @@ kế), **SVG càng sạch, càng đúng tỉ lệ thật thì kết quả càng 
       màu nền lên trên.
 - [ ] Không còn path rác/artefact siêu nhỏ sót lại từ phần mềm vector hoá.
 - [ ] Không có transform gây méo tỉ lệ thật của thiết kế.
+- [ ] Fill của mọi path là màu đặc, không dùng gradient hoặc độ trong suốt
+      mờ dần.
 - [ ] Bề dày mỗi path đủ rõ ràng — nét satin vẽ mỏng hẳn, mảng fill vẽ dày
       hẳn so với ngưỡng `bề_rộng_logo / 6`, tránh rơi vào vùng lưng chừng.
+- [ ] Các nét vốn là một khối satin liền mạch được gộp thành một `<path>`
+      duy nhất, không tách rời rồi đặt sát/chồng mép nhau.
+- [ ] Không có path chồng mép (overlap) ngoài ý muốn ở biên giữa các
+      vùng khác nhãn; các đối tượng tách biệt có khoảng hở rõ ràng thay
+      vì chạm khít biên.
 - [ ] (Nếu có) nhãn `inkscape:label`/`class`/`id` đặt đúng, rõ ràng, tránh
       nhầm với thuộc tính khác cùng tên; ưu tiên gắn nhãn tường minh cho
       các chi tiết nằm sát ranh giới satin/fill.
 
 ---
 
-## 7. Giới hạn cần lưu ý
+## 8. Giới hạn cần lưu ý
 
 - Ngưỡng `threshold_mm = bề_rộng_logo / 6` là tỉ lệ cố định — logo có chi
   tiết đặc biệt mảnh hoặc đặc biệt dày so với tổng thể có thể cần tinh
@@ -178,3 +239,8 @@ kế), **SVG càng sạch, càng đúng tỉ lệ thật thì kết quả càng 
   ở độ phân giải đầy đủ.
 - Hệ thống không hiểu ngữ nghĩa thiết kế (chữ, logo, icon...) — mọi quyết
   định đều dựa trên số đo hình học thuần túy.
+- Cơ chế tinh chỉnh theo ngữ cảnh cho phần "nằm trong lỗ của viền satin"
+  (mục 4) chỉ xử lý đúng khi quan hệ chứa/chạm biên giữa hai path là rõ
+  ràng; các trường hợp tiếp xúc mập mờ (chạm một phần nhỏ, bao phủ gần
+  nhưng không đủ 50%...) có thể cho kết quả không như mong đợi và nên
+  kiểm tra lại bằng mắt trên ảnh preview.
