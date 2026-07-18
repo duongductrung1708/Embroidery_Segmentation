@@ -13,7 +13,7 @@ Tài liệu này liệt kê các yêu cầu bắt buộc và khuyến nghị cho
 Ngưỡng phân biệt satin/fill được tính **động** dựa trên bề rộng thật (mm)
 của logo:
 
-```
+```python
 threshold_mm = bề_rộng_thật_của_logo_mm / 6
 ```
 
