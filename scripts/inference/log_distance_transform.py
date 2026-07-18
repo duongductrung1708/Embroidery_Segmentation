@@ -393,4 +393,4 @@ def debug_shape_thickness_fixed(image_path, physical_width_mm=80.0, threshold_ra
 
 # Test thu
 if __name__ == "__main__":
-    debug_shape_thickness_fixed('data/opencv_test/predictions/test_pred.png', physical_width_mm=80.0, threshold_ratio=6.0)
+    debug_shape_thickness_fixed('data/opencv_test/predictions/96_pred.png', physical_width_mm=80.0, threshold_ratio=6.0)
