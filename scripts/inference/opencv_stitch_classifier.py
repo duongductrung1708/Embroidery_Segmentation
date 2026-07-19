@@ -284,7 +284,7 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
 
     # --- BẢN FIX: ĐO ĐỘ DÀY LẤP LỖ (CÓ ĐIỀU KIỆN) ---
     filled_thickness_mm = 0.0
-    if num_holes >= 4 and solidity > 0.40:
+    if num_holes >= 5 and solidity > 0.40:
         filled_mask = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(filled_mask, [shape.contour], -1, 1, thickness=cv2.FILLED)
         # Đo max thickness nhanh trên bản đã lấp lỗ (không cần skeleton)
@@ -315,7 +315,7 @@ def _classify_shape(shape: Shape, mask: np.ndarray, is_outer_candidate: bool,
 
     if thickness_mm <= threshold_mm:
         # Bắt mảng nền bị đục nhiều lỗ bằng kết quả sau khi Lấp Lỗ
-        if num_holes >= 4 and filled_thickness_mm > threshold_mm and solidity > 0.40:
+        if num_holes >= 5 and filled_thickness_mm > threshold_mm and solidity > 0.40:
             label = "fill"
         else:
             # Bẫy 2: Nền giả viền mảng bự
