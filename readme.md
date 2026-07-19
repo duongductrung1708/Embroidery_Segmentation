@@ -1,9 +1,10 @@
 # Yêu cầu file SVG đầu vào — Stitch Classifier (Satin vs Fill)
 
 Module nhận vào một file SVG và tự động phân loại từng vùng thành **satin**
-hoặc **fill**. Vì thuật toán đọc và phân loại **trực tiếp trên hình học của
-từng `<path>`** (không qua bước render/gộp màu thủ công), chất lượng và độ
-"sạch" của file SVG đầu vào quyết định trực tiếp độ chính xác của kết quả.
+hoặc **fill**. Thuật toán rasterize **từng `<path>` riêng lẻ** bằng CairoSVG
+rồi đo hình học trên mask của path đó (không dựa vào màu gốc của path để
+quyết định nhãn). Vì vậy chất lượng và độ "sạch" của file SVG đầu vào quyết
+định trực tiếp độ chính xác của kết quả.
 Tài liệu này liệt kê các yêu cầu bắt buộc và khuyến nghị cho file SVG.
 
 ---
@@ -62,14 +63,11 @@ hoặc `viewBox` đúng tỉ lệ thật của thiết kế.
   dày đo được phải phản ánh đúng bề dày thật ngoài đời của nét.
 - **Tránh dùng màu tô dạng gradient** (`linearGradient`, `radialGradient`,
   `fill="url(#...)"`) cho path — nên dùng **màu đặc, không trong suốt**
-  (`fill="#RRGGBB"`, `fill-opacity="1"`). Gradient có 2 vấn đề: (1) không
-  còn là một mã màu duy nhất, nên phá vỡ quy ước gán nhãn theo màu ở mục 5
-  (hệ thống không nhận ra `#ff0000`/`#0000ff` khi màu là một chuỗi tham
-  chiếu gradient); (2) nếu gradient có các điểm dừng trong suốt/mờ dần,
-  vùng mờ đó có thể bị tính sai là "không có mực" ở bước xác định biên
-  logo, làm lệch kích thước thật dùng để tính ngưỡng phân loại cho toàn bộ
-  file. Ngoài ra, chỉ thêu được màu chỉ đặc — gradient vốn không có ý
-  nghĩa vật lý khi lên khung thêu.
+  (`fill="#RRGGBB"`, `fill-opacity="1"`). Gradient có thể có các điểm dừng
+  trong suốt/mờ dần, khiến vùng mờ đó bị tính sai là "không có mực" ở bước
+  xác định biên logo, làm lệch kích thước thật dùng để tính ngưỡng phân loại
+  cho toàn bộ file. Ngoài ra, chỉ thêu được màu chỉ đặc — gradient vốn không
+  có ý nghĩa vật lý khi lên khung thêu.
 
 ---
 
@@ -159,18 +157,17 @@ mắt thường.
 ## 5. (Tùy chọn) Gán nhãn có sẵn cho path
 
 Nếu file SVG đã có sẵn nhãn (ví dụ do người thiết kế gắn tay), hệ thống có
-thể ưu tiên đọc trực tiếp thay vì tự suy luận hình học, theo thứ tự:
+thể ưu tiên đọc trực tiếp thay vì tự suy luận hình học khi bật
+`use_existing_svg_labels=True`.
 
-1. Thuộc tính `inkscape:label` (hoặc thuộc tính nào có tên kết thúc bằng
-   `label`) chứa chuỗi `"satin"` hoặc `"fill"` (không phân biệt hoa
-   thường).
-2. Thuộc tính `data-label`, `data-stitch`, `data-stitch-type`, `class`,
-   hoặc `id` chứa chuỗi `"satin"` hoặc `"fill"`.
-3. Mã màu trong `style`: `#ff0000` → satin; `#0000ff`/`#00ff00` → fill.
-   (Chỉ nhận diện được màu đặc dạng mã hex — path dùng gradient sẽ không
-   khớp được với quy ước này, xem lưu ý ở mục 2.)
-4. Nếu path không có nhãn nào ở trên, hệ thống sẽ tự phân loại hoàn toàn
-   dựa trên hình học (bề dày, độ đặc, tỉ lệ mực) như mô tả ở mục 6.
+Hiện tại module chỉ ưu tiên thuộc tính `inkscape:label` chứa chuỗi
+`"satin"` hoặc `"fill"` (không phân biệt hoa thường). Nếu path không có
+`inkscape:label`, hệ thống sẽ tự phân loại dựa trên hình học (bề dày, độ
+đặc, tỉ lệ mực) như mô tả ở mục 6.
+
+Các thuộc tính `data-label`, `data-stitch`, `class`, `id` hiện được ghi ra
+ở SVG kết quả để bên ngoài dễ đọc, nhưng **không phải nguồn label đầu vào**
+trong module hiện tại.
 
 Đây không phải yêu cầu bắt buộc — file SVG không có nhãn vẫn được xử lý
 bình thường bằng thuật toán hình học.
@@ -183,8 +180,8 @@ Với mỗi path, hệ thống đo:
 
 - **Bề dày (thickness_mm):** bề dày ước lượng của nét/mảng.
 - **Độ đặc (solidity):** diện tích thật / diện tích convex hull.
-- **Tỉ lệ mực (ink_ratio):** diện tích shape / tổng diện tích có mực toàn
-  path — đo mức độ shape chiếm phần lớn lượng mực.
+- **Tỉ lệ mực (ink_ratio):** diện tích shape / tổng diện tích có mực của
+  toàn logo — đo mức độ shape chiếm phần lớn lượng mực.
 - **Số lỗ, tỉ lệ khung hình, có phải viền ngoài lớn nhất hay không.**
 
 Quy tắc:
@@ -192,7 +189,7 @@ Quy tắc:
 1. Bề dày quá nhỏ **và** diện tích quá nhỏ → coi là **nhiễu**, loại bỏ.
 2. Nét **mỏng hơn ngưỡng** (ứng viên satin), nhưng sẽ bị ép thành **fill**
    nếu:
-   - có nhiều lỗ (≥ 4) **và** khá đặc (không phải chữ/text mảnh), hoặc
+   - có nhiều lỗ (≥ 5) **và** khá đặc (không phải chữ/text mảnh), hoặc
    - chiếm tỉ lệ mực lớn **và** khá đặc (mảng lớn giả dạng viền mỏng).
    - Còn lại → **satin**.
 3. Nét **dày hơn ngưỡng** → **fill**.
@@ -223,9 +220,8 @@ kế), **SVG càng sạch, càng đúng tỉ lệ thật thì kết quả càng 
 - [ ] Không có path chồng mép (overlap) ngoài ý muốn ở biên giữa các
       vùng khác nhãn; các đối tượng tách biệt có khoảng hở rõ ràng thay
       vì chạm khít biên.
-- [ ] (Nếu có) nhãn `inkscape:label`/`class`/`id` đặt đúng, rõ ràng, tránh
-      nhầm với thuộc tính khác cùng tên; ưu tiên gắn nhãn tường minh cho
-      các chi tiết nằm sát ranh giới satin/fill.
+- [ ] (Nếu có) nhãn `inkscape:label` đặt đúng, rõ ràng; ưu tiên gắn nhãn
+      tường minh cho các chi tiết nằm sát ranh giới satin/fill.
 
 ---
 
