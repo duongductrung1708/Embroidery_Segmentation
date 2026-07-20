@@ -11,8 +11,40 @@ nhật thì API đóng gói cũng đi theo cùng logic.
 from embroidery_labeler import LabelingConfig, label_svg_bytes, label_svg_file, label_svg_files
 ```
 
-Module này được import từ root của repo. Nếu gọi từ service/web app bên ngoài,
-hãy đảm bảo repo nằm trong `PYTHONPATH` hoặc được mount/copy vào project backend.
+## Cài đặt package
+
+Trong môi trường Python của backend/web service:
+
+```bash
+pip install .
+```
+
+Khi đang phát triển trực tiếp trong repo:
+
+```bash
+pip install -e .
+```
+
+Nếu môi trường không có mạng nhưng đã cài sẵn dependencies/build tools:
+
+```bash
+pip install -e . --no-deps --no-build-isolation
+```
+
+Nếu muốn build wheel để đưa cho bên thứ ba:
+
+```bash
+python -m pip install build
+python -m build
+```
+
+Wheel sẽ nằm trong thư mục `dist/`, ví dụ:
+
+```bash
+pip install dist/embroidery_stitch_labeler-0.1.0-py3-none-any.whl
+```
+
+Sau khi cài package, backend có thể import trực tiếp `embroidery_labeler`.
 
 ### Label một file SVG
 
@@ -128,6 +160,8 @@ config = LabelingConfig(
 
 - Cần chạy trong environment có các dependency hiện tại của repo:
   `opencv-python`, `numpy`, `pillow`, `cairosvg`, `scikit-image`.
+- Nếu cài qua `pip install .`, các dependency tối thiểu của module sẽ được
+  khai báo trong `pyproject.toml`.
 - Với SVG upload dạng bytes, module tạo temp file nội bộ để CairoSVG render ổn
   định.
 - Nếu SVG có tham chiếu file ngoài bằng path tương đối như image/font local,

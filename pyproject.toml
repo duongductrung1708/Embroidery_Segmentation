@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embroidery-stitch-labeler"
+version = "0.1.0"
+description = "Rule-based SVG stitch classifier that labels paths as fill or satin."
+readme = "readme.md"
+requires-python = ">=3.9"
+dependencies = [
+    "cairosvg",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "scikit-image",
+    "scipy",
+    "tqdm",
+]
+
+[tool.setuptools]
+packages = [
+    "embroidery_labeler",
+    "scripts",
+    "scripts.inference",
+]
